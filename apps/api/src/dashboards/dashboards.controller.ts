@@ -1,0 +1,77 @@
+import { Controller, Get, Param, UseGuards } from "@nestjs/common";
+import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
+import { UserRole } from "@prisma/client";
+import { Roles } from "../auth/decorators/roles.decorator";
+import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
+import { RolesGuard } from "../auth/guards/roles.guard";
+import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { SchoolParamGuard } from "../common/guards/school-param.guard";
+import type { JwtPayload } from "../common/types/jwt-payload";
+import { DashboardsService } from "./dashboards.service";
+import { CohortDashboardResponse } from "./dto/cohort-dashboard.dto";
+import { PrincipalDashboardResponse } from "./dto/principal-dashboard.dto";
+import { Student360DashboardResponse } from "./dto/student360-dashboard.dto";
+import { TeacherDashboardResponse } from "./dto/teacher-dashboard.dto";
+
+@ApiTags("dashboards")
+@Controller("schools/:schoolId")
+@UseGuards(JwtAuthGuard, RolesGuard, SchoolParamGuard)
+export class DashboardsController {
+  constructor(private readonly dashboards: DashboardsService) {}
+
+  @Get("dashboards/teacher/:teacherId")
+  @Roles(UserRole.ADMIN, UserRole.PRINCIPAL, UserRole.TEACHER)
+  @ApiOperation({ summary: "Teacher dashboard: classes, snapshot deltas, attention, LMS heatmap" })
+  @ApiOkResponse({ type: TeacherDashboardResponse })
+  getTeacherDashboard(
+    @Param("schoolId") schoolId: string,
+    @Param("teacherId") teacherId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.dashboards.getTeacherDashboard(schoolId, teacherId, user);
+  }
+
+  @Get("dashboards/principal")
+  @Roles(UserRole.ADMIN, UserRole.PRINCIPAL)
+  @ApiOperation({ summary: "Principal dashboard: school snapshot trends, cohorts, interventions, heatmap" })
+  @ApiOkResponse({ type: PrincipalDashboardResponse })
+  getPrincipalDashboard(@Param("schoolId") schoolId: string, @CurrentUser() user: JwtPayload) {
+    return this.dashboards.getPrincipalDashboard(schoolId, user);
+  }
+
+  @Get("dashboards/cohorts/grades/:gradeId")
+  @Roles(UserRole.ADMIN, UserRole.PRINCIPAL)
+  @ApiOperation({ summary: "Grade cohort dashboard (weekly snapshots + LMS heatmap)" })
+  @ApiOkResponse({ type: CohortDashboardResponse })
+  getCohortGrade(
+    @Param("schoolId") schoolId: string,
+    @Param("gradeId") gradeId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.dashboards.getCohortGradeDashboard(schoolId, gradeId, user);
+  }
+
+  @Get("dashboards/cohorts/subjects/:subjectId")
+  @Roles(UserRole.ADMIN, UserRole.PRINCIPAL)
+  @ApiOperation({ summary: "Subject cohort dashboard (weekly snapshots + LMS heatmap)" })
+  @ApiOkResponse({ type: CohortDashboardResponse })
+  getCohortSubject(
+    @Param("schoolId") schoolId: string,
+    @Param("subjectId") subjectId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.dashboards.getCohortSubjectDashboard(schoolId, subjectId, user);
+  }
+
+  @Get("dashboards/students/:studentId")
+  @Roles(UserRole.ADMIN, UserRole.PRINCIPAL, UserRole.TEACHER)
+  @ApiOperation({ summary: "Student 360: snapshot deltas, live analytics, risk, interventions, heatmap" })
+  @ApiOkResponse({ type: Student360DashboardResponse })
+  getStudent360(
+    @Param("schoolId") schoolId: string,
+    @Param("studentId") studentId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.dashboards.getStudent360(schoolId, studentId, user);
+  }
+}

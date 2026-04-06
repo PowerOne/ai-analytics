@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "1.0",
+  "entityType": "assessment_result",
+  "source": {
+    "kind": "rest",
+    "listPath": "$.data.results[*]",
+    "pagination": { "style": "offset", "offsetParam": "offset", "limitParam": "limit", "pageSize": 100 }
+  },
+  "identity": {
+    "businessKey": ["assessment_id", "student_id", "attempt_no"]
+  },
+  "fields": [
+    {
+      "target": "assessment_id",
+      "required": true,
+      "sources": [{ "type": "jsonPath", "path": "$.assessmentId" }],
+      "transforms": [{ "op": "uuid" }]
+    },
+    {
+      "target": "student_id",
+      "required": true,
+      "sources": [{ "type": "jsonPath", "path": "$.userSisId" }],
+      "transforms": [{ "op": "lookupStudentByExternalId", "column": "external_id" }]
+    },
+    {
+      "target": "score_raw",
+      "required": false,
+      "sources": [{ "type": "jsonPath", "path": "$.score" }],
+      "transforms": [{ "op": "decimal" }]
+    },
+    {
+      "target": "score_percent",
+      "required": false,
+      "sources": [{ "type": "jsonPath", "path": "$.percentCorrect" }],
+      "transforms": [{ "op": "decimal" }, { "op": "clamp", "min": 0, "max": 100 }]
+    },
+    {
+      "target": "submitted_at",
+      "required": false,
+      "sources": [{ "type": "jsonPath", "path": "$.submittedAt" }],
+      "transforms": [{ "op": "iso8601" }]
+    }
+  ],
+  "defaults": {
+    "attempt_no": 1
+  }
+}

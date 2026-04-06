@@ -1,0 +1,19 @@
+{
+  "name": "learning-analytics-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -ws --if-present",
+    "dev:api": "npm run dev -w @learning-analytics/api",
+    "dev:web": "npm run dev -w @learning-analytics/web",
+    "build": "npm run build -ws --if-present",
+    "lint": "npm run lint -ws --if-present",
+    "clean": "npx rimraf \"apps/*/node_modules\" \"packages/*/node_modules\" node_modules dist .next"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

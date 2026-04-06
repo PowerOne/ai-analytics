@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "1.0",
+  "entityType": "student",
+  "source": {
+    "kind": "csv",
+    "delimiter": ",",
+    "encoding": "utf-8",
+    "headerRow": true,
+    "skipRows": 0
+  },
+  "identity": {
+    "businessKey": ["external_id"],
+    "externalIdColumn": "STUDENT_NUMBER"
+  },
+  "fields": [
+    {
+      "target": "external_id",
+      "required": true,
+      "sources": [{ "type": "column", "name": "STUDENT_NUMBER" }],
+      "transforms": [{ "op": "trim" }, { "op": "string" }]
+    },
+    {
+      "target": "given_name",
+      "required": true,
+      "sources": [{ "type": "column", "name": "LEGAL_FIRST" }],
+      "transforms": [{ "op": "trim" }]
+    },
+    {
+      "target": "family_name",
+      "required": false,
+      "sources": [{ "type": "column", "name": "LEGAL_LAST" }],
+      "transforms": [{ "op": "trim" }]
+    },
+    {
+      "target": "grade_level",
+      "required": false,
+      "sources": [{ "type": "column", "name": "GRADE" }],
+      "transforms": [{ "op": "trim" }, { "op": "map", "map": { "K": "K", "01": "1" } }]
+    },
+    {
+      "target": "email",
+      "required": false,
+      "sources": [{ "type": "column", "name": "STUDENT_EMAIL" }],
+      "transforms": [{ "op": "lowercase" }, { "op": "email" }]
+    }
+  ],
+  "defaults": {
+    "metadata": { "importSource": "powerschool_export" }
+  },
+  "validation": {
+    "emailFields": ["email"]
+  }
+}

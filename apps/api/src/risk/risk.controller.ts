@@ -1,0 +1,34 @@
+import { Controller, Get, Param, UseGuards } from "@nestjs/common";
+import { UserRole } from "@prisma/client";
+import { Roles } from "../auth/decorators/roles.decorator";
+import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
+import { RolesGuard } from "../auth/guards/roles.guard";
+import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { SchoolParamGuard } from "../common/guards/school-param.guard";
+import type { JwtPayload } from "../common/types/jwt-payload";
+import { RiskService } from "./risk.service";
+
+@Controller("schools/:schoolId")
+@UseGuards(JwtAuthGuard, RolesGuard, SchoolParamGuard)
+@Roles(UserRole.ADMIN, UserRole.PRINCIPAL, UserRole.TEACHER)
+export class RiskController {
+  constructor(private readonly risk: RiskService) {}
+
+  @Get("classes/:classId/risk")
+  getClassRisk(
+    @Param("schoolId") schoolId: string,
+    @Param("classId") classId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.risk.getClassRisk(schoolId, classId, user);
+  }
+
+  @Get("students/:studentId/risk")
+  getStudentRisk(
+    @Param("schoolId") schoolId: string,
+    @Param("studentId") studentId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.risk.getStudentRisk(schoolId, studentId, user);
+  }
+}
