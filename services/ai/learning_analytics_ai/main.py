@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 
+from learning_analytics_ai.api.generate import router as generate_router
 from learning_analytics_ai.api.predict import router as predict_router
 
 app = FastAPI(
@@ -11,6 +12,7 @@ app = FastAPI(
 )
 
 app.include_router(predict_router)
+app.include_router(generate_router)
 
 
 @app.get("/health")

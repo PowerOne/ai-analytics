@@ -23,4 +23,16 @@ export class StudentAttentionSummary {
 
   @ApiProperty({ description: "Interventions touching this student in the last 7 days" })
   interventionsThisWeek!: number;
+
+  @ApiProperty({
+    description:
+      "Snapshot-based stability: perf/att/eng deltas plus inverted risk change (this week vs last week snapshots)",
+  })
+  stability!: number;
+
+  @ApiProperty({ description: "thisWeek.riskComposite − lastWeek.riskComposite (Risk Engine)" })
+  riskEngineDelta!: number;
+
+  @ApiProperty({ description: "AI-generated intervention suggestions (dashboards only)" })
+  interventions!: unknown[];
 }

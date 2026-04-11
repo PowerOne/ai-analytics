@@ -2,7 +2,8 @@
 // https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -138,6 +139,15 @@ model Student {
   cohortYear     Int?      @map("cohort_year")
   demographics   Json      @default("{}")
   metadata       Json      @default("{}")
+  performance    Float?
+  attendance     Float?
+  engagement     Float?
+  riskScore      Float?    @map("risk_score")
+  deltas         Json      @default("{}")
+  tiers          Json      @default("{}")
+  flags          Json      @default("{}")
+  stability      Float?
+  classId        String?   @map("class_id") @db.Uuid
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
   deletedAt      DateTime? @map("deleted_at")
@@ -417,6 +427,12 @@ model WeeklyStudentSnapshot {
   riskScore   Float?
   riskTier    String? // "LOW" | "MEDIUM" | "HIGH"
 
+  riskComposite Float?
+  riskCategory  String?
+  riskReasons   Json?
+  riskStability Float?
+  riskDeltas    Json?
+
   createdAt DateTime @default(now())
 
   @@index([schoolId, weekStartDate])
@@ -437,6 +453,12 @@ model WeeklyClassSnapshot {
   attendance  Float?
   engagement  Float?
   riskScore   Float?
+
+  riskComposite Float?
+  riskCategory  String?
+  riskReasons   Json?
+  riskStability Float?
+  riskDeltas    Json?
 
   createdAt DateTime @default(now())
 
@@ -493,6 +515,12 @@ model WeeklySchoolSnapshot {
 
   interventionsCreated  Int?
   interventionsResolved Int?
+
+  riskComposite Float?
+  riskCategory  String?
+  riskReasons   Json?
+  riskStability Float?
+  riskDeltas    Json?
 
   createdAt DateTime @default(now())
 

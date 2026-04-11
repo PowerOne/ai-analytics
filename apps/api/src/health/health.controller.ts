@@ -1,9 +1,21 @@
-import { Controller, Get } from "@nestjs/common";
+import { Controller, Get, ServiceUnavailableException } from "@nestjs/common";
+import { PrismaService } from "../prisma/prisma.service";
 
 @Controller("health")
 export class HealthController {
+  constructor(private readonly prisma: PrismaService) {}
+
+  /** Liveness + DB readiness: returns 503 if the database is unreachable. */
   @Get()
-  check() {
-    return { status: "up", database: "not_configured" };
+  async check() {
+    try {
+      await this.prisma.$queryRaw`SELECT 1`;
+      return { status: "up", database: "connected" };
+    } catch {
+      throw new ServiceUnavailableException({
+        status: "unavailable",
+        database: "disconnected",
+      });
+    }
   }
 }

@@ -11,6 +11,7 @@ import type { Prisma } from "@prisma/client";
 import { AxiosError } from "axios";
 import { firstValueFrom } from "rxjs";
 import type { JwtPayload } from "../common/types/jwt-payload";
+import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import { scopeClasses, scopeStudents } from "../common/tenant-scope";
 import { PrismaService } from "../prisma/prisma.service";
 import type { HeatmapCell } from "./dto/heatmap-cell.dto";
@@ -103,7 +104,7 @@ export class LmsHeatmapsService {
     try {
       const res = await firstValueFrom(
         this.http.post<{ summary?: string }>(`${this.getAiBaseUrl()}/generate-lms-heatmap-summary`, payload, {
-          headers: { "Content-Type": "application/json" },
+          headers: aiHttpHeaders(this.config),
           timeout: this.config.get<number>("AI_SERVICE_TIMEOUT_MS") ?? 60_000,
         }),
       );

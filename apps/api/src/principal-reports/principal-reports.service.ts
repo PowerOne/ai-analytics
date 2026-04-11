@@ -5,6 +5,7 @@ import { UserRole } from "@prisma/client";
 import { AxiosError } from "axios";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import type { TrendPoint } from "../analytics/dto/common.dto";
 import type { CohortSummaryResponse } from "../cohort-analytics/dto/cohort-summary.dto";
 import { CohortAnalyticsService } from "../cohort-analytics/cohort-analytics.service";
@@ -165,7 +166,7 @@ export class PrincipalReportsService {
           `${this.getAiBaseUrl()}/generate-principal-report-summary`,
           payload,
           {
-            headers: { "Content-Type": "application/json" },
+            headers: aiHttpHeaders(this.config),
             timeout: this.config.get<number>("AI_SERVICE_TIMEOUT_MS") ?? 60_000,
           },
         ),
@@ -213,6 +214,7 @@ export class PrincipalReportsService {
       engagementDelta,
       riskDelta,
       highRiskNew,
+      riskCompositeDelta: 0,
     };
   }
 

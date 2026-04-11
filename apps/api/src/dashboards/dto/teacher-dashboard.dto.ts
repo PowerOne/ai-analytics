@@ -43,6 +43,9 @@ export class ClassDashboardSummary {
 
   @ApiProperty({ description: "thisWeek.riskScore − lastWeek.riskScore" })
   riskDelta!: number;
+
+  @ApiProperty({ description: "thisWeek.riskComposite − lastWeek.riskComposite (Risk Engine)" })
+  riskCompositeDelta!: number;
 }
 
 export class TeacherHeatmapBlockDto {

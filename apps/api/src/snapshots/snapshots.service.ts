@@ -1,19 +1,13 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { UserRole } from "@prisma/client";
 import { AnalyticsService } from "../analytics/analytics.service";
-import type { TrendPoint } from "../analytics/dto/common.dto";
-import { CohortAnalyticsService } from "../cohort-analytics/cohort-analytics.service";
 import type { JwtPayload } from "../common/types/jwt-payload";
-import { LmsHeatmapsService } from "../lms-heatmaps/lms-heatmaps.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RiskService } from "../risk/risk.service";
 import { RiskLevel } from "../risk/dto/risk-level.enum";
+import type { RiskInput } from "../risk/risk-engine.types";
+import { computeSnapshotStability } from "../weekly-reports/snapshot-stability.util";
 
-function formatYmd(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
-/** Monday 00:00 UTC of the calendar week containing `d`. */
 function mondayUtcContaining(d: Date): Date {
   const x = new Date(d);
   const day = x.getUTCDay();
@@ -23,41 +17,13 @@ function mondayUtcContaining(d: Date): Date {
   return x;
 }
 
-/**
- * Monday UTC of the week that just ended (the completed Mon–Sun block before the current UTC week).
- * Intended when the cron runs Monday 02:00 UTC.
- */
-export function weekStartMondayUtcOfLastCompletedWeek(now: Date): Date {
-  const thisMonday = mondayUtcContaining(now);
-  const prev = new Date(thisMonday);
-  prev.setUTCDate(thisMonday.getUTCDate() - 7);
-  return prev;
-}
-
-function endOfWeekInclusiveUtc(weekStartMonday: Date): Date {
-  const end = new Date(weekStartMonday);
-  end.setUTCDate(end.getUTCDate() + 6);
-  end.setUTCHours(23, 59, 59, 999);
-  return end;
-}
-
-function meanTimeline(points: TrendPoint[]): number | null {
+function meanTimeline(points: { value: number }[]): number {
   const vals = points.filter((p) => Number.isFinite(p.value)).map((p) => p.value);
-  if (!vals.length) return null;
-  return vals.reduce((a, b) => a + b, 0) / vals.length;
+  if (!vals.length) return 0;
+  return vals.reduce((s, v) => s + v, 0) / vals.length;
 }
 
-function principalScope(schoolId: string): JwtPayload {
-  return {
-    sub: "system-weekly-snapshots",
-    email: "system@snapshots.internal",
-    schoolId,
-    role: UserRole.PRINCIPAL,
-    teacherId: null,
-  };
-}
-
-function riskTierSnapshot(level: RiskLevel): string {
+function riskTierLabel(level: RiskLevel): string {
   switch (level) {
     case RiskLevel.LOW:
       return "LOW";
@@ -70,277 +36,304 @@ function riskTierSnapshot(level: RiskLevel): string {
   }
 }
 
-const BATCH = 32;
-
-async function mapInBatches<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = [];
-  for (let i = 0; i < items.length; i += BATCH) {
-    const chunk = items.slice(i, i + BATCH);
-    const part = await Promise.all(chunk.map((x) => fn(x)));
-    out.push(...part);
-  }
-  return out;
+function classifyTier(value: number): number {
+  if (value >= 80) return 1;
+  if (value >= 50) return 2;
+  return 3;
 }
 
 @Injectable()
 export class SnapshotsService {
-  private readonly logger = new Logger(SnapshotsService.name);
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly analytics: AnalyticsService,
     private readonly risk: RiskService,
-    private readonly lmsHeatmaps: LmsHeatmapsService,
-    private readonly cohortAnalytics: CohortAnalyticsService,
   ) {}
 
-  async runWeeklySnapshot(): Promise<void> {
-    const now = new Date();
-    const weekStart = weekStartMondayUtcOfLastCompletedWeek(now);
-    const weekEndInclusive = endOfWeekInclusiveUtc(weekStart);
-    const fromStr = formatYmd(weekStart);
-    const toStr = weekEndInclusive.toISOString();
+  private principalScope(schoolId: string): JwtPayload {
+    return {
+      sub: "snapshot-cron",
+      email: "snapshot-cron@local",
+      schoolId,
+      role: UserRole.PRINCIPAL,
+      teacherId: null,
+    };
+  }
 
-    this.logger.log(
-      `Weekly snapshots: weekStartDate=${fromStr} (UTC Mon), window to ${toStr}`,
-    );
+  async runWeeklySnapshot(): Promise<void> {
+    const weekStart = mondayUtcContaining(new Date());
+    const lastWeekStart = new Date(weekStart);
+    lastWeekStart.setUTCDate(lastWeekStart.getUTCDate() - 7);
 
     const schools = await this.prisma.school.findMany({
       where: { deletedAt: null },
       select: { id: true },
     });
 
-    const settled = await Promise.allSettled(
-      schools.map((s) => this.snapshotSchool(s.id, weekStart, fromStr, toStr)),
-    );
-    let ok = 0;
-    for (let i = 0; i < settled.length; i++) {
-      const r = settled[i]!;
-      if (r.status === "fulfilled") ok += 1;
-      else this.logger.error(`Snapshot failed for school ${schools[i]!.id}: ${r.reason}`);
-    }
-    this.logger.log(`Weekly snapshots: ${ok}/${schools.length} school(s) completed without errors.`);
-  }
+    for (const { id: schoolId } of schools) {
+      const scoped = this.principalScope(schoolId);
 
-  private async snapshotSchool(
-    schoolId: string,
-    weekStart: Date,
-    fromStr: string,
-    toStr: string,
-  ): Promise<void> {
-    const existing = await this.prisma.weeklySchoolSnapshot.findFirst({
-      where: { schoolId, weekStartDate: weekStart },
-    });
-    if (existing) {
-      this.logger.warn(`Skipping school ${schoolId}: snapshot already exists for ${fromStr}`);
-      return;
-    }
-
-    const scoped = principalScope(schoolId);
-
-    const [classes, students, _subjects] = await Promise.all([
-      this.prisma.class.findMany({
-        where: { schoolId },
-        include: {
-          subject: true,
-          enrollments: {
-            where: { status: "active", deletedAt: null },
-            include: { student: true },
+      const enrollments = await this.prisma.enrollment.findMany({
+        where: { schoolId, status: "active", deletedAt: null },
+        select: {
+          studentId: true,
+          classId: true,
+          student: {
+            select: {
+              id: true,
+              classId: true,
+              performance: true,
+              attendance: true,
+              engagement: true,
+              riskScore: true,
+              deltas: true,
+              tiers: true,
+              flags: true,
+              stability: true,
+            },
           },
         },
-      }),
-      this.prisma.student.findMany({ where: { schoolId } }),
-      this.prisma.subject.findMany({ where: { schoolId } }),
-    ]);
-    void _subjects;
+      });
 
-    const weekEndExclusive = new Date(weekStart);
-    weekEndExclusive.setUTCDate(weekEndExclusive.getUTCDate() + 7);
-
-    const studentRows = await mapInBatches(students, async (st) => {
-      try {
-        const [a, r, hm] = await Promise.all([
-          this.analytics.getStudentAnalytics(st.id, scoped),
-          this.risk.getStudentRisk(schoolId, st.id, scoped),
-          this.lmsHeatmaps.getStudentHeatmap(schoolId, st.id, scoped, fromStr, toStr),
-        ]);
-        const performance = meanTimeline(a.scoreTimeline ?? []);
-        const attendance = meanTimeline(a.attendanceTimeline ?? []);
-        const engagement = (hm.heatmap ?? []).reduce((s, c) => s + c.count, 0);
-        return {
-          schoolId,
-          studentId: st.id,
-          weekStartDate: weekStart,
-          performance: performance ?? undefined,
-          attendance: attendance ?? undefined,
-          engagement,
-          riskScore: r.overall,
-          riskTier: riskTierSnapshot(r.level),
-        };
-      } catch (e) {
-        this.logger.warn(`Student ${st.id} snapshot skipped: ${e instanceof Error ? e.message : e}`);
-        return null;
+      const studentIdToClassId = new Map<string, string>();
+      const studentRowById = new Map<string, (typeof enrollments)[0]["student"]>();
+      for (const e of enrollments) {
+        if (!studentIdToClassId.has(e.studentId)) {
+          studentIdToClassId.set(e.studentId, e.classId);
+          studentRowById.set(e.studentId, e.student);
+        }
       }
-    });
 
-    const studentData = studentRows.filter((x): x is NonNullable<typeof x> => x != null);
+      const riskInputsByClass = new Map<string, RiskInput[]>();
 
-    const classRows = await mapInBatches(classes, async (cls) => {
-      try {
-        const [a, r, hm] = await Promise.all([
-          this.analytics.getClassAnalytics(cls.id, scoped),
-          this.risk.getClassRisk(schoolId, cls.id, scoped),
-          this.lmsHeatmaps.getClassHeatmap(schoolId, cls.id, scoped, fromStr, toStr),
-        ]);
-        const engagement = (hm.heatmap ?? []).reduce((s, c) => s + c.count, 0);
-        return {
-          schoolId,
-          classId: cls.id,
-          weekStartDate: weekStart,
-          performance: a.averageScore ?? undefined,
-          attendance: a.attendanceRate ?? undefined,
-          engagement,
-          riskScore: r.overall,
+      for (const studentId of studentIdToClassId.keys()) {
+        const classId = studentIdToClassId.get(studentId)!;
+        const student = studentRowById.get(studentId)!;
+
+        const a = await this.analytics.getStudentAnalytics(studentId, scoped);
+        const r = await this.risk.getStudentRisk(schoolId, studentId, scoped);
+
+        const perf = Math.round(meanTimeline(a.scoreTimeline ?? []) * 10) / 10;
+        const att = Math.round(meanTimeline(a.attendanceTimeline ?? []) * 1000) / 1000;
+        const eng = a.engagementScore ?? 0;
+        const riskScore = r.overall;
+
+        const lastSnap = await this.prisma.weeklyStudentSnapshot.findFirst({
+          where: { schoolId, studentId, weekStartDate: lastWeekStart },
+        });
+
+        const perfDelta = lastSnap?.performance != null ? perf - (lastSnap.performance ?? 0) : 0;
+        const attDelta = lastSnap?.attendance != null ? att - (lastSnap.attendance ?? 0) : 0;
+        const engDelta = lastSnap?.engagement != null ? eng - (lastSnap.engagement ?? 0) : 0;
+        const riskDelta =
+          lastSnap?.riskScore != null ? riskScore - (lastSnap.riskScore ?? 0) : 0;
+
+        const deltas = {
+          performance: perfDelta,
+          attendance: attDelta,
+          engagement: engDelta,
+          risk: riskDelta,
         };
-      } catch (e) {
-        this.logger.warn(`Class ${cls.id} snapshot skipped: ${e instanceof Error ? e.message : e}`);
-        return null;
+
+        const stThisLike = {
+          performance: perf,
+          attendance: att,
+          engagement: eng,
+          riskScore,
+        };
+        const stLastLike = lastSnap
+          ? {
+              performance: lastSnap.performance,
+              attendance: lastSnap.attendance,
+              engagement: lastSnap.engagement,
+              riskScore: lastSnap.riskScore,
+            }
+          : null;
+
+        const stability = computeSnapshotStability(stThisLike as never, stLastLike as never);
+
+        const tiers = {
+          performance: classifyTier(perf),
+          attendance: classifyTier(att * 100),
+          engagement: classifyTier(eng),
+          risk: classifyTier(100 - riskScore),
+        };
+
+        const riskInput: RiskInput = {
+          studentId: student.id,
+          classId: student.classId ?? classId,
+          performance: student.performance ?? perf,
+          attendance: student.attendance ?? att,
+          engagement: student.engagement ?? eng,
+          riskScore: student.riskScore ?? riskScore,
+          deltas: (student.deltas as RiskInput["deltas"]) ?? deltas,
+          tiers: (student.tiers as RiskInput["tiers"]) ?? tiers,
+          flags:
+            (student.flags as RiskInput["flags"]) ?? {
+              lowPerformance: false,
+              lowAttendance: false,
+              lowEngagement: false,
+              highRisk: false,
+            },
+          stability: student.stability ?? stability,
+        };
+
+        const engineRisk = this.risk.getStudentRiskEngine(riskInput);
+
+        const existing = await this.prisma.weeklyStudentSnapshot.findFirst({
+          where: { schoolId, studentId, weekStartDate: weekStart },
+        });
+
+        const payload = {
+          performance: perf,
+          attendance: att,
+          engagement: eng,
+          riskScore,
+          riskTier: riskTierLabel(r.level),
+          riskComposite: engineRisk.compositeRisk,
+          riskCategory: engineRisk.category,
+          riskReasons: engineRisk.reasons,
+          riskStability: engineRisk.stability,
+          riskDeltas: engineRisk.deltas,
+        };
+
+        if (existing) {
+          await this.prisma.weeklyStudentSnapshot.update({
+            where: { id: existing.id },
+            data: payload,
+          });
+        } else {
+          await this.prisma.weeklyStudentSnapshot.create({
+            data: {
+              schoolId,
+              studentId,
+              weekStartDate: weekStart,
+              ...payload,
+            },
+          });
+        }
+
+        if (!riskInputsByClass.has(classId)) riskInputsByClass.set(classId, []);
+        riskInputsByClass.get(classId)!.push(riskInput);
       }
-    });
 
-    const classData = classRows.filter((x): x is NonNullable<typeof x> => x != null);
+      const classes = await this.prisma.class.findMany({
+        where: { schoolId, deletedAt: null },
+        select: { id: true },
+      });
 
-    const [gradeCohorts, subjectCohorts] = await Promise.all([
-      this.cohortAnalytics.listGradeCohorts(schoolId, scoped),
-      this.cohortAnalytics.listSubjectCohorts(schoolId, scoped),
-    ]);
+      for (const { id: classId } of classes) {
+        const inputs = riskInputsByClass.get(classId) ?? [];
+        const engineClass = inputs.length ? this.risk.getClassRiskEngine(inputs) : null;
 
-    const cohortData = [
-      ...gradeCohorts.map((c) => ({
-        schoolId,
-        cohortType: "GRADE",
-        cohortId: c.id,
-        name: c.name,
-        weekStartDate: weekStart,
-        performance: c.performance ?? undefined,
-        attendance: c.attendance ?? undefined,
-        engagement: c.engagement ?? undefined,
-        riskLow: c.risk.low,
-        riskMedium: c.risk.medium,
-        riskHigh: c.risk.high,
-        riskAverage: c.risk.average,
-        interventions: c.interventions,
-      })),
-      ...subjectCohorts.map((c) => ({
-        schoolId,
-        cohortType: "SUBJECT",
-        cohortId: c.id,
-        name: c.name,
-        weekStartDate: weekStart,
-        performance: c.performance ?? undefined,
-        attendance: c.attendance ?? undefined,
-        engagement: c.engagement ?? undefined,
-        riskLow: c.risk.low,
-        riskMedium: c.risk.medium,
-        riskHigh: c.risk.high,
-        riskAverage: c.risk.average,
-        interventions: c.interventions,
-      })),
-    ];
+        const classExisting = await this.prisma.weeklyClassSnapshot.findFirst({
+          where: { schoolId, classId, weekStartDate: weekStart },
+        });
 
-    let low = 0;
-    let medium = 0;
-    let high = 0;
-    let riskSum = 0;
-    let riskN = 0;
-    for (const s of studentData) {
-      if (s.riskTier === "LOW") low += 1;
-      else if (s.riskTier === "MEDIUM") medium += 1;
-      else if (s.riskTier === "HIGH") high += 1;
-      if (s.riskScore != null) {
-        riskSum += s.riskScore;
-        riskN += 1;
+        const classA = await this.analytics.getClassAnalytics(classId, scoped);
+        const perf = classA.averageScore ?? 0;
+        const att = classA.attendanceRate ?? 0;
+        const eng = classA.engagementScore ?? 0;
+        const classR = await this.risk.getClassRisk(schoolId, classId, scoped);
+
+        const lastClass = await this.prisma.weeklyClassSnapshot.findFirst({
+          where: { schoolId, classId, weekStartDate: lastWeekStart },
+        });
+
+        const classPayload = {
+          performance: perf,
+          attendance: att,
+          engagement: eng,
+          riskScore: classR.overall,
+          riskComposite: engineClass?.classRisk ?? undefined,
+          riskCategory: engineClass
+            ? engineClass.distribution.high > 0
+              ? "high"
+              : engineClass.distribution.medium >= engineClass.distribution.low
+                ? "medium"
+                : "low"
+            : undefined,
+          riskReasons: [],
+          riskStability: engineClass
+            ? inputs.reduce((s, i) => s + i.stability, 0) / Math.max(1, inputs.length)
+            : undefined,
+          riskDeltas: engineClass
+            ? {
+                performance: lastClass?.performance != null ? perf - (lastClass.performance ?? 0) : 0,
+                attendance: lastClass?.attendance != null ? att - (lastClass.attendance ?? 0) : 0,
+                engagement: lastClass?.engagement != null ? eng - (lastClass.engagement ?? 0) : 0,
+                risk: lastClass?.riskScore != null ? classR.overall - (lastClass.riskScore ?? 0) : 0,
+              }
+            : undefined,
+        };
+
+        if (classExisting) {
+          await this.prisma.weeklyClassSnapshot.update({
+            where: { id: classExisting.id },
+            data: classPayload,
+          });
+        } else {
+          await this.prisma.weeklyClassSnapshot.create({
+            data: {
+              schoolId,
+              classId,
+              weekStartDate: weekStart,
+              ...classPayload,
+            },
+          });
+        }
+      }
+
+      const studentSnaps = await this.prisma.weeklyStudentSnapshot.findMany({
+        where: { schoolId, weekStartDate: weekStart },
+      });
+
+      const avg = (xs: (number | null | undefined)[]) => {
+        const vals = xs.filter((x): x is number => x != null && Number.isFinite(x));
+        return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      };
+
+      const schoolExisting = await this.prisma.weeklySchoolSnapshot.findFirst({
+        where: { schoolId, weekStartDate: weekStart },
+      });
+
+      const schoolPayload = {
+        performance: avg(studentSnaps.map((s) => s.performance)),
+        attendance: avg(studentSnaps.map((s) => s.attendance)),
+        engagement: avg(studentSnaps.map((s) => s.engagement)),
+        riskLow: studentSnaps.filter((s) => (s.riskTier ?? "").toUpperCase() === "LOW").length,
+        riskMedium: studentSnaps.filter((s) => (s.riskTier ?? "").toUpperCase() === "MEDIUM").length,
+        riskHigh: studentSnaps.filter((s) => (s.riskTier ?? "").toUpperCase() === "HIGH").length,
+        riskAverage: avg(studentSnaps.map((s) => s.riskScore)),
+        riskComposite: avg(studentSnaps.map((s) => s.riskComposite)),
+        riskCategory:
+          studentSnaps.filter((s) => (s.riskCategory ?? "") === "high").length >
+          studentSnaps.length / 2
+            ? "high"
+            : studentSnaps.filter((s) => (s.riskCategory ?? "") === "medium").length > 0
+              ? "medium"
+              : "low",
+        riskReasons: [],
+        riskStability: avg(studentSnaps.map((s) => s.riskStability)) ?? undefined,
+        riskDeltas: undefined,
+      };
+
+      if (schoolExisting) {
+        await this.prisma.weeklySchoolSnapshot.update({
+          where: { id: schoolExisting.id },
+          data: schoolPayload,
+        });
+      } else {
+        await this.prisma.weeklySchoolSnapshot.create({
+          data: {
+            schoolId,
+            weekStartDate: weekStart,
+            interventionsCreated: 0,
+            interventionsResolved: 0,
+            ...schoolPayload,
+          },
+        });
       }
     }
-    const riskAverage = riskN ? Math.round((riskSum / riskN) * 10) / 10 : null;
-
-    const [interventionsCreated, interventionsResolved] = await Promise.all([
-      this.prisma.intervention.count({
-        where: {
-          schoolId,
-          createdAt: { gte: weekStart, lt: weekEndExclusive },
-        },
-      }),
-      this.prisma.intervention.count({
-        where: {
-          schoolId,
-          status: "resolved",
-          updatedAt: { gte: weekStart, lt: weekEndExclusive },
-        },
-      }),
-    ]);
-
-    const sp = studentData.map((s) => s.performance).filter((x): x is number => x != null);
-    const sa = studentData.map((s) => s.attendance).filter((x): x is number => x != null);
-    const se = studentData.map((s) => s.engagement).filter((x): x is number => x != null);
-    const cp = classData.map((c) => c.performance).filter((x): x is number => x != null);
-    const ca = classData.map((c) => c.attendance).filter((x): x is number => x != null);
-    const ce = classData.map((c) => c.engagement).filter((x): x is number => x != null);
-
-    const schoolPerformance =
-      sp.length && cp.length
-        ? (sp.reduce((a, b) => a + b, 0) / sp.length + cp.reduce((a, b) => a + b, 0) / cp.length) / 2
-        : sp.length
-          ? sp.reduce((a, b) => a + b, 0) / sp.length
-          : cp.length
-            ? cp.reduce((a, b) => a + b, 0) / cp.length
-            : null;
-    const schoolAttendance =
-      sa.length && ca.length
-        ? (sa.reduce((a, b) => a + b, 0) / sa.length + ca.reduce((a, b) => a + b, 0) / ca.length) / 2
-        : sa.length
-          ? sa.reduce((a, b) => a + b, 0) / sa.length
-          : ca.length
-            ? ca.reduce((a, b) => a + b, 0) / ca.length
-            : null;
-    const schoolEngagement =
-      se.length && ce.length
-        ? (se.reduce((a, b) => a + b, 0) / se.length + ce.reduce((a, b) => a + b, 0) / ce.length) / 2
-        : se.length
-          ? se.reduce((a, b) => a + b, 0) / se.length
-          : ce.length
-            ? ce.reduce((a, b) => a + b, 0) / ce.length
-            : null;
-
-    await this.prisma.$transaction(async (tx) => {
-      if (studentData.length) {
-        await tx.weeklyStudentSnapshot.createMany({ data: studentData });
-      }
-      if (classData.length) {
-        await tx.weeklyClassSnapshot.createMany({ data: classData });
-      }
-      if (cohortData.length) {
-        await tx.weeklyCohortSnapshot.createMany({ data: cohortData });
-      }
-      await tx.weeklySchoolSnapshot.create({
-        data: {
-          schoolId,
-          weekStartDate: weekStart,
-          performance: schoolPerformance ?? undefined,
-          attendance: schoolAttendance ?? undefined,
-          engagement: schoolEngagement ?? undefined,
-          riskLow: low,
-          riskMedium: medium,
-          riskHigh: high,
-          riskAverage: riskAverage ?? undefined,
-          interventionsCreated,
-          interventionsResolved,
-        },
-      });
-    });
-
-    this.logger.log(
-      `School ${schoolId}: wrote ${studentData.length} students, ${classData.length} classes, ${cohortData.length} cohorts, 1 school row.`,
-    );
   }
 }

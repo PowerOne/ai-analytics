@@ -1,6 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
+import { aiHttpHeaders } from "./ai-request-headers";
+
 /**
  * Example: backend → AI service with shared secret (never expose this key to the browser).
  * Wire this when Nest calls POST /predict/student_risk on the Python service.
@@ -12,10 +14,8 @@ export class AiInternalClient {
   constructor(private readonly config: ConfigService) {}
 
   async postPredictStudentRisk(body: unknown): Promise<unknown> {
-    const base = this.config.get<string>("AI_SERVICE_URL") ?? "http://localhost:8000";
-    const key = this.config.get<string>("INTERNAL_API_KEY");
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (key) headers["X-Internal-Key"] = key;
+    const base = this.config.get<string>("AI_SERVICE_URL") ?? "http://ai:8000";
+    const headers = aiHttpHeaders(this.config);
 
     const res = await fetch(`${base}/predict/student_risk`, {
       method: "POST",

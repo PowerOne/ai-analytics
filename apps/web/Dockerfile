@@ -1,18 +1,22 @@
-# Build from monorepo root: docker build -f apps/web/Dockerfile .
+# Monorepo root: docker build -f apps/web/Dockerfile .
 FROM node:20-alpine AS builder
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 WORKDIR /app
-ARG NEXT_PUBLIC_API_URL=http://localhost:3001
+
+ARG NEXT_PUBLIC_API_URL=http://localhost:3001/api
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-COPY package.json package-lock.json ./
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
 COPY apps/web/package.json apps/web/
-COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY apps/web apps/web
-RUN npm ci
-RUN npm run build -w @learning-analytics/shared
+
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @learning-analytics/shared run build
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build -w @learning-analytics/web
+RUN pnpm --filter @learning-analytics/web run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app

@@ -1,16 +1,20 @@
 {
   "name": "learning-analytics-monorepo",
   "private": true,
+  "packageManager": "pnpm@9.15.4",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "services/*",
+    "examples/*",
+    "infra/*"
   ],
   "scripts": {
-    "dev": "npm run dev -ws --if-present",
-    "dev:api": "npm run dev -w @learning-analytics/api",
-    "dev:web": "npm run dev -w @learning-analytics/web",
-    "build": "npm run build -ws --if-present",
-    "lint": "npm run lint -ws --if-present",
+    "dev": "pnpm --parallel --filter @learning-analytics/api --filter @learning-analytics/web dev",
+    "dev:api": "pnpm --filter @learning-analytics/api dev",
+    "dev:web": "pnpm --filter @learning-analytics/web dev",
+    "build": "pnpm --filter @learning-analytics/shared build && pnpm --filter @learning-analytics/api build && pnpm --filter @learning-analytics/web build",
+    "lint": "pnpm --filter @learning-analytics/api lint && pnpm --filter @learning-analytics/web lint",
     "clean": "npx rimraf \"apps/*/node_modules\" \"packages/*/node_modules\" node_modules dist .next"
   },
   "engines": {

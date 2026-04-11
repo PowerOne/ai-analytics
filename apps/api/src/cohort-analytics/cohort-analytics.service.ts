@@ -5,6 +5,7 @@ import { UserRole } from "@prisma/client";
 import { AxiosError } from "axios";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import type { TrendPoint } from "../analytics/dto/common.dto";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import { PrismaService } from "../prisma/prisma.service";
@@ -105,7 +106,7 @@ export class CohortAnalyticsService {
     try {
       const res = await firstValueFrom(
         this.http.post<{ summary?: string }>(`${this.getAiBaseUrl()}/generate-cohort-summary`, payload, {
-          headers: { "Content-Type": "application/json" },
+          headers: aiHttpHeaders(this.config),
           timeout: this.config.get<number>("AI_SERVICE_TIMEOUT_MS") ?? 60_000,
         }),
       );

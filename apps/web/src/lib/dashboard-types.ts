@@ -14,6 +14,9 @@ export interface StudentAttentionSummary {
   engagementDelta: number;
   riskDelta: number;
   interventionsThisWeek: number;
+  stability: number;
+  riskEngineDelta: number;
+  interventions: unknown[];
 }
 
 export interface ClassDashboardSummary {
@@ -37,6 +40,7 @@ export interface ClassDashboardSummary {
   attendanceDelta: number;
   engagementDelta: number;
   riskDelta: number;
+  riskCompositeDelta: number;
 }
 
 export interface TeacherDashboardResponse {
@@ -54,6 +58,7 @@ export interface SchoolTrendSummary {
   engagementDelta: number;
   riskDelta: number;
   highRiskNew: number;
+  riskCompositeDelta: number;
 }
 
 export interface PrincipalCohortRow {
@@ -75,6 +80,7 @@ export interface PrincipalDashboardResponse {
   interventions: { created: number; resolved: number; resolutionRate: number };
   heatmap: { daily: LmsHeatmapCell[]; weekly: LmsHeatmapCell[] };
   aiSummary?: string | null;
+  schoolInterventions: unknown[];
 }
 
 export interface CohortDashboardResponse {
@@ -97,6 +103,7 @@ export interface Student360DashboardResponse {
   attendanceDelta: number;
   engagementDelta: number;
   riskDelta: number;
+  riskCompositeDelta: number;
   current: {
     performance: number;
     attendance: number;
@@ -104,7 +111,20 @@ export interface Student360DashboardResponse {
     riskScore: number;
     riskTier: string;
   };
-  interventions: number;
+  riskEngine: {
+    compositeRisk: number;
+    category: "low" | "medium" | "high";
+    reasons: string[];
+  };
+  riskEngineHistory: {
+    composite: number | null;
+    category: string | null;
+    reasons: string[];
+    stability: number | null;
+    deltas: Record<string, unknown> | null;
+  };
+  interventionCount: number;
+  interventions: unknown[];
   heatmap: { daily: LmsHeatmapCell[]; weekly: LmsHeatmapCell[] };
   aiSummary?: string | null;
 }

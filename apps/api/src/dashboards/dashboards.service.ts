@@ -16,12 +16,15 @@ import { LmsHeatmapsService } from "../lms-heatmaps/lms-heatmaps.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { RiskService } from "../risk/risk.service";
 import { RiskLevel } from "../risk/dto/risk-level.enum";
+import { RiskInput, type RiskOutput } from "../risk/risk-engine.types";
 import type { SchoolTrendSummary } from "../principal-reports/dto/school-trend.dto";
 import type { CohortDashboardResponse } from "./dto/cohort-dashboard.dto";
 import type { PrincipalDashboardResponse } from "./dto/principal-dashboard.dto";
 import type { Student360DashboardResponse } from "./dto/student360-dashboard.dto";
 import type { TeacherDashboardResponse } from "./dto/teacher-dashboard.dto";
 import type { StudentAttentionSummary } from "../weekly-reports/dto/student-attention-summary.dto";
+import { aiHttpHeaders } from "../integrations/ai-request-headers";
+import { computeSnapshotStability } from "../weekly-reports/snapshot-stability.util";
 
 function toPrincipalScope(user: JwtPayload, schoolId: string): JwtPayload {
   return {
@@ -72,6 +75,11 @@ function deltaEngagement(a: number | null | undefined, b: number | null | undefi
 }
 
 function deltaRisk(a: number | null | undefined, b: number | null | undefined): number {
+  if (a == null || b == null) return 0;
+  return Math.round((a - b) * 10) / 10;
+}
+
+function deltaCompositeRisk(a: number | null | undefined, b: number | null | undefined): number {
   if (a == null || b == null) return 0;
   return Math.round((a - b) * 10) / 10;
 }
@@ -140,7 +148,7 @@ export class DashboardsService {
     try {
       const res = await firstValueFrom(
         this.http.post<{ summary?: string }>(`${this.getAiBaseUrl()}${path}`, payload, {
-          headers: { "Content-Type": "application/json" },
+          headers: aiHttpHeaders(this.config),
           timeout: this.config.get<number>("AI_SERVICE_TIMEOUT_MS") ?? 60_000,
         }),
       );
@@ -154,6 +162,182 @@ export class DashboardsService {
       }
       return null;
     }
+  }
+
+  /** POST to AI service and parse a JSON array (interventions or schoolInterventions); does not modify tryAi(). */
+  private async postAiJsonArray(path: string, payload: Record<string, unknown>): Promise<unknown[]> {
+    try {
+      const res = await firstValueFrom(
+        this.http.post<Record<string, unknown>>(`${this.getAiBaseUrl()}${path}`, payload, {
+          headers: aiHttpHeaders(this.config),
+          timeout: this.config.get<number>("AI_SERVICE_TIMEOUT_MS") ?? 60_000,
+        }),
+      );
+      const d = res.data;
+      if (Array.isArray(d)) return d;
+      if (d && typeof d === "object") {
+        if (Array.isArray(d.interventions)) return d.interventions as unknown[];
+        if (Array.isArray(d.schoolInterventions)) return d.schoolInterventions as unknown[];
+      }
+      return [];
+    } catch (err) {
+      if (err instanceof AxiosError) {
+        this.logger.warn(`Dashboard AI ${path} failed: ${err.response?.status ?? err.code}`);
+      } else {
+        this.logger.warn(`Dashboard AI ${path} failed: ${err instanceof Error ? err.message : err}`);
+      }
+      return [];
+    }
+  }
+
+  /**
+   * Build intervention context and request AI-generated interventions (separate from tryAi summary).
+   */
+  async getInterventions(studentId: string): Promise<unknown[]> {
+    const student = await this.prisma.student.findFirst({
+      where: { id: studentId, deletedAt: null },
+    });
+    if (!student) return [];
+
+    const schoolId = student.schoolId;
+    const scoped: JwtPayload = {
+      sub: "interventions",
+      email: "interventions@local",
+      schoolId,
+      role: UserRole.PRINCIPAL,
+      teacherId: null,
+    };
+
+    const now = new Date();
+    const thisWeekMonday = mondayUtcContaining(now);
+    const lastWeekMonday = new Date(thisWeekMonday);
+    lastWeekMonday.setUTCDate(lastWeekMonday.getUTCDate() - 7);
+
+    const enrollment = await this.prisma.enrollment.findFirst({
+      where: { schoolId, studentId, status: "active", deletedAt: null },
+      orderBy: { id: "asc" },
+    });
+    const classId = enrollment?.classId ?? student.classId ?? "";
+
+    const [stThis, stLast, classThis, classLast, schoolThis, schoolLast] = await Promise.all([
+      this.prisma.weeklyStudentSnapshot.findFirst({
+        where: { schoolId, studentId, weekStartDate: thisWeekMonday },
+      }),
+      this.prisma.weeklyStudentSnapshot.findFirst({
+        where: { schoolId, studentId, weekStartDate: lastWeekMonday },
+      }),
+      classId
+        ? this.prisma.weeklyClassSnapshot.findFirst({
+            where: { schoolId, classId, weekStartDate: thisWeekMonday },
+          })
+        : null,
+      classId
+        ? this.prisma.weeklyClassSnapshot.findFirst({
+            where: { schoolId, classId, weekStartDate: lastWeekMonday },
+          })
+        : null,
+      this.prisma.weeklySchoolSnapshot.findFirst({
+        where: { schoolId, weekStartDate: thisWeekMonday },
+      }),
+      this.prisma.weeklySchoolSnapshot.findFirst({
+        where: { schoolId, weekStartDate: lastWeekMonday },
+      }),
+    ]);
+
+    const classA = classId ? await this.analytics.getClassAnalytics(classId, scoped) : null;
+
+    const riskInput: RiskInput = {
+      studentId,
+      classId: student.classId ?? classId ?? "",
+      performance: student.performance ?? 0,
+      attendance: student.attendance ?? 0,
+      engagement: student.engagement ?? 0,
+      riskScore: student.riskScore ?? 0,
+      deltas: (student.deltas as RiskInput["deltas"]) ?? { performance: 0, attendance: 0, engagement: 0, risk: 0 },
+      tiers: (student.tiers as RiskInput["tiers"]) ?? { performance: 1, attendance: 1, engagement: 1, risk: 1 },
+      flags:
+        (student.flags as RiskInput["flags"]) ?? {
+          lowPerformance: false,
+          lowAttendance: false,
+          lowEngagement: false,
+          highRisk: false,
+        },
+      stability: student.stability ?? 0,
+    };
+
+    const engineRisk: RiskOutput = this.risk.getStudentRiskEngine(riskInput);
+
+    const riskEngineHistory = {
+      composite: stThis?.riskComposite ?? null,
+      category: stThis?.riskCategory ?? null,
+      reasons: Array.isArray(stThis?.riskReasons) ? (stThis.riskReasons as string[]) : [],
+      stability: stThis?.riskStability ?? null,
+      deltas: (stThis?.riskDeltas as Record<string, unknown> | null) ?? null,
+    };
+
+    const deltas = {
+      performanceDelta: deltaPerformance(stThis?.performance, stLast?.performance),
+      attendanceDelta: deltaAttendance(stThis?.attendance, stLast?.attendance),
+      engagementDelta: deltaEngagement(stThis?.engagement, stLast?.engagement),
+      riskDelta: deltaRisk(stThis?.riskScore, stLast?.riskScore),
+      riskCompositeDelta: deltaCompositeRisk(stThis?.riskComposite, stLast?.riskComposite),
+    };
+
+    const classContext = {
+      classId: classId || null,
+      averages: classA
+        ? {
+            performance: classA.averageScore ?? 0,
+            attendance: classA.attendanceRate ?? 0,
+            engagement: classA.engagementScore ?? 0,
+          }
+        : null,
+      riskComposite: classThis?.riskComposite ?? null,
+      riskCompositeDelta: deltaCompositeRisk(classThis?.riskComposite, classLast?.riskComposite),
+      deltas: {
+        performance: deltaPerformance(classThis?.performance, classLast?.performance),
+        attendance: deltaAttendance(classThis?.attendance, classLast?.attendance),
+        engagement: deltaEngagement(classThis?.engagement, classLast?.engagement),
+        risk: deltaRisk(classThis?.riskScore, classLast?.riskScore),
+      },
+      thisWeek: classThis ? snapshotStrip(classThis) : null,
+      lastWeek: classLast ? snapshotStrip(classLast) : null,
+    };
+
+    const schoolContext = {
+      averages: {
+        performance: schoolThis?.performance ?? null,
+        attendance: schoolThis?.attendance ?? null,
+        engagement: schoolThis?.engagement ?? null,
+      },
+      riskComposite: schoolThis?.riskComposite ?? null,
+      riskCompositeDelta: deltaCompositeRisk(schoolThis?.riskComposite, schoolLast?.riskComposite),
+      deltas: {
+        performance: deltaPerformance(schoolThis?.performance, schoolLast?.performance),
+        attendance: deltaAttendance(schoolThis?.attendance, schoolLast?.attendance),
+        engagement: deltaEngagement(schoolThis?.engagement, schoolLast?.engagement),
+        risk: deltaRisk(schoolThis?.riskAverage, schoolLast?.riskAverage),
+      },
+    };
+
+    const previousInterventions = await this.prisma.intervention.findMany({
+      where: { schoolId, studentId },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+
+    const payload: Record<string, unknown> = {
+      student,
+      class: classContext,
+      school: schoolContext,
+      riskEngine: engineRisk,
+      riskEngineHistory,
+      deltas,
+      snapshots: { thisWeek: stThis, lastWeek: stLast },
+      interventionsHistory: previousInterventions ?? [],
+    };
+
+    return this.postAiJsonArray("/generate-interventions", payload);
   }
 
   assertTeacherSelf(user: JwtPayload, teacherId: string): void {
@@ -216,32 +400,36 @@ export class DashboardsService {
     for (const c of classes) for (const e of c.enrollments) studentIds.add(e.studentId);
     const studentIdList = [...studentIds];
 
-    const [classThis, classLast, studThis, studLast, hm, interventionsThisWeek] = await Promise.all([
-      classIds.length
-        ? this.prisma.weeklyClassSnapshot.findMany({
-            where: { schoolId, classId: { in: classIds }, weekStartDate: thisWeekMonday },
-          })
-        : [],
-      classIds.length
-        ? this.prisma.weeklyClassSnapshot.findMany({
-            where: { schoolId, classId: { in: classIds }, weekStartDate: lastWeekMonday },
-          })
-        : [],
-      studentIdList.length
-        ? this.prisma.weeklyStudentSnapshot.findMany({
-            where: { schoolId, studentId: { in: studentIdList }, weekStartDate: thisWeekMonday },
-          })
-        : [],
-      studentIdList.length
-        ? this.prisma.weeklyStudentSnapshot.findMany({
-            where: { schoolId, studentId: { in: studentIdList }, weekStartDate: lastWeekMonday },
-          })
-        : [],
-      this.lmsHeatmaps.getSchoolHeatmap(schoolId, scoped, fromStr, toStr),
-      this.prisma.intervention.count({
-        where: { schoolId, teacherId, createdAt: { gte: thisWeekMonday } },
-      }),
-    ]);
+    const [classThis, classLast, studThis, studLast, schoolThisSnap, hm, interventionsThisWeek] =
+      await Promise.all([
+        classIds.length
+          ? this.prisma.weeklyClassSnapshot.findMany({
+              where: { schoolId, classId: { in: classIds }, weekStartDate: thisWeekMonday },
+            })
+          : [],
+        classIds.length
+          ? this.prisma.weeklyClassSnapshot.findMany({
+              where: { schoolId, classId: { in: classIds }, weekStartDate: lastWeekMonday },
+            })
+          : [],
+        studentIdList.length
+          ? this.prisma.weeklyStudentSnapshot.findMany({
+              where: { schoolId, studentId: { in: studentIdList }, weekStartDate: thisWeekMonday },
+            })
+          : [],
+        studentIdList.length
+          ? this.prisma.weeklyStudentSnapshot.findMany({
+              where: { schoolId, studentId: { in: studentIdList }, weekStartDate: lastWeekMonday },
+            })
+          : [],
+        this.prisma.weeklySchoolSnapshot.findFirst({
+          where: { schoolId, weekStartDate: thisWeekMonday },
+        }),
+        this.lmsHeatmaps.getSchoolHeatmap(schoolId, scoped, fromStr, toStr),
+        this.prisma.intervention.count({
+          where: { schoolId, teacherId, createdAt: { gte: thisWeekMonday } },
+        }),
+      ]);
 
     const classThisMap = new Map(classThis.map((r) => [r.classId, r]));
     const classLastMap = new Map(classLast.map((r) => [r.classId, r]));
@@ -260,6 +448,7 @@ export class DashboardsService {
         attendanceDelta: deltaAttendance(t?.attendance, l?.attendance),
         engagementDelta: deltaEngagement(t?.engagement, l?.engagement),
         riskDelta: deltaRisk(t?.riskScore, l?.riskScore),
+        riskCompositeDelta: deltaCompositeRisk(t?.riskComposite, l?.riskComposite),
       };
     });
 
@@ -287,13 +476,24 @@ export class DashboardsService {
         });
         const riskTierThisWeek = st?.riskTier ?? null;
         const riskTierLastWeek = lw?.riskTier ?? null;
+        const riskEngineDelta = deltaCompositeRisk(st?.riskComposite, lw?.riskComposite);
         const needsAttention =
           (isHighSnapshotTier(riskTierThisWeek) && !isHighSnapshotTier(riskTierLastWeek)) ||
+          (st?.riskCategory ?? "").toLowerCase() === "high" ||
+          riskEngineDelta > 10 ||
           performanceDelta < -10 ||
           attendanceDropAttention(attendanceDelta) ||
           engagementDelta < -30 ||
           interventionsThisWeekStudent > 0;
         if (!needsAttention) return null;
+        const stability = computeSnapshotStability(st, lw);
+        const multiNegative =
+          [performanceDelta, attendanceDelta, engagementDelta, riskDelta].filter((d) => d < 0).length >= 2;
+        const shouldFetchInterventions =
+          (st?.riskCategory ?? "").toLowerCase() === "high" ||
+          riskEngineDelta > 10 ||
+          multiNegative;
+        const interventions = shouldFetchInterventions ? await this.getInterventions(sid) : [];
         return {
           studentId: sid,
           name: studentNameById.get(sid) ?? sid,
@@ -302,6 +502,9 @@ export class DashboardsService {
           engagementDelta,
           riskDelta,
           interventionsThisWeek: interventionsThisWeekStudent,
+          stability,
+          riskEngineDelta,
+          interventions,
         } satisfies StudentAttentionSummary;
       }),
     );
@@ -313,6 +516,20 @@ export class DashboardsService {
       classes: classSummaries,
       attentionStudents,
       interventionsThisWeek,
+      interventions: attentionStudents.map((a) => ({
+        studentId: a.studentId,
+        interventions: a.interventions,
+      })),
+      riskEngine: null,
+      riskEngineHistory: {
+        composite: schoolThisSnap?.riskComposite ?? null,
+        category: schoolThisSnap?.riskCategory ?? null,
+        reasons: Array.isArray(schoolThisSnap?.riskReasons)
+          ? (schoolThisSnap.riskReasons as string[])
+          : [],
+        stability: schoolThisSnap?.riskStability ?? null,
+        deltas: (schoolThisSnap?.riskDeltas as Record<string, unknown> | null) ?? null,
+      },
     });
 
     return {
@@ -373,6 +590,7 @@ export class DashboardsService {
       engagementDelta: deltaEngagement(schoolThis?.engagement, schoolLast?.engagement),
       riskDelta: deltaRisk(schoolThis?.riskAverage, schoolLast?.riskAverage),
       highRiskNew: schoolThis?.riskHigh ?? 0,
+      riskCompositeDelta: deltaCompositeRisk(schoolThis?.riskComposite, schoolLast?.riskComposite),
     };
 
     const cohorts = cohortThis.map((t) => {
@@ -398,11 +616,40 @@ export class DashboardsService {
     const resolutionRate =
       created > 0 ? Math.min(1, Math.round((resolved / created) * 1000) / 1000) : 0;
 
+    const schoolContext = {
+      thisWeek: schoolThis,
+      lastWeek: schoolLast,
+      averages: {
+        performance: schoolThis?.performance ?? null,
+        attendance: schoolThis?.attendance ?? null,
+        engagement: schoolThis?.engagement ?? null,
+      },
+      riskComposite: schoolThis?.riskComposite ?? null,
+      riskCompositeDelta: deltaCompositeRisk(schoolThis?.riskComposite, schoolLast?.riskComposite),
+    };
+
+    const schoolRiskHistory = {
+      composite: schoolThis?.riskComposite ?? null,
+      category: schoolThis?.riskCategory ?? null,
+      reasons: Array.isArray(schoolThis?.riskReasons) ? (schoolThis.riskReasons as string[]) : [],
+      stability: schoolThis?.riskStability ?? null,
+      deltas: (schoolThis?.riskDeltas as Record<string, unknown> | null) ?? null,
+    };
+
+    const schoolInterventions = await this.postAiJsonArray("/generate-school-interventions", {
+      school: schoolContext,
+      trends: schoolTrends,
+      riskEngineHistory: schoolRiskHistory,
+    });
+
     const aiSummary = await this.tryAi("/generate-principal-dashboard-summary", {
       schoolId,
       schoolTrends,
       cohorts,
       interventions: { created, resolved, resolutionRate },
+      schoolInterventions,
+      riskEngine: null,
+      riskEngineHistory: schoolRiskHistory,
     });
 
     return {
@@ -412,6 +659,7 @@ export class DashboardsService {
       interventions: { created, resolved, resolutionRate },
       heatmap: { daily: hm.heatmap, weekly: hm.weekly },
       aiSummary,
+      schoolInterventions,
     };
   }
 
@@ -477,6 +725,8 @@ export class DashboardsService {
         average: t.riskAverage ?? 0,
       },
       interventions: t.interventions ?? 0,
+      riskEngine: null,
+      riskEngineHistory: null,
     });
 
     return {
@@ -560,6 +810,8 @@ export class DashboardsService {
         average: t.riskAverage ?? 0,
       },
       interventions: t.interventions ?? 0,
+      riskEngine: null,
+      riskEngineHistory: null,
     });
 
     return {
@@ -594,6 +846,29 @@ export class DashboardsService {
     });
     if (!student) throw new NotFoundException("Student not found");
 
+    // Build RiskInput for the Risk Engine
+    const riskInput: RiskInput = {
+      studentId,
+      classId: student.classId ?? "",
+      performance: student.performance ?? 0,
+      attendance: student.attendance ?? 0,
+      engagement: student.engagement ?? 0,
+      riskScore: student.riskScore ?? 0,
+      deltas: (student.deltas as RiskInput["deltas"]) ?? { performance: 0, attendance: 0, engagement: 0, risk: 0 },
+      tiers: (student.tiers as RiskInput["tiers"]) ?? { performance: 1, attendance: 1, engagement: 1, risk: 1 },
+      flags:
+        (student.flags as RiskInput["flags"]) ?? {
+          lowPerformance: false,
+          lowAttendance: false,
+          lowEngagement: false,
+          highRisk: false,
+        },
+      stability: student.stability ?? 0,
+    };
+
+    // Run the Risk Engine
+    const engineRisk = this.risk.getStudentRiskEngine(riskInput);
+
     const scoped =
       user.role === UserRole.TEACHER && user.teacherId
         ? asTeacherJwt(user, schoolId, user.teacherId)
@@ -626,6 +901,17 @@ export class DashboardsService {
     const attendanceDelta = deltaAttendance(stThis?.attendance, stLast?.attendance);
     const engagementDelta = deltaEngagement(stThis?.engagement, stLast?.engagement);
     const riskDelta = deltaRisk(stThis?.riskScore, stLast?.riskScore);
+    const riskCompositeDelta = deltaCompositeRisk(stThis?.riskComposite, stLast?.riskComposite);
+
+    const riskEngineHistory = {
+      composite: stThis?.riskComposite ?? null,
+      category: stThis?.riskCategory ?? null,
+      reasons: Array.isArray(stThis?.riskReasons) ? (stThis.riskReasons as string[]) : [],
+      stability: stThis?.riskStability ?? null,
+      deltas: (stThis?.riskDeltas as Record<string, unknown> | null) ?? null,
+    };
+
+    const interventionsFromAi = await this.getInterventions(studentId);
 
     const current = {
       performance: Math.round(meanTimeline(a.scoreTimeline ?? []) * 10) / 10,
@@ -640,7 +926,10 @@ export class DashboardsService {
       studentId,
       deltas: { performanceDelta, attendanceDelta, engagementDelta, riskDelta },
       current,
-      interventions: interventionCount,
+      interventionCount,
+      interventions: interventionsFromAi,
+      riskEngine: engineRisk,
+      riskEngineHistory,
     });
 
     return {
@@ -649,10 +938,59 @@ export class DashboardsService {
       attendanceDelta,
       engagementDelta,
       riskDelta,
+      riskCompositeDelta,
       current,
-      interventions: interventionCount,
+      riskEngine: {
+        compositeRisk: engineRisk.compositeRisk,
+        category: engineRisk.category,
+        reasons: engineRisk.reasons,
+      },
+      riskEngineHistory,
+      interventionCount,
+      interventions: interventionsFromAi,
       heatmap: { daily: hm.heatmap, weekly: hm.weekly },
       aiSummary,
     };
+  }
+
+  /** NEW: Class-level risk using the Risk Engine */
+  async getClassRiskEngine(classId: string) {
+    const students = await this.prisma.student.findMany({
+      where: {
+        enrollments: { some: { classId, status: "active", deletedAt: null } },
+      },
+      select: {
+        id: true,
+        performance: true,
+        attendance: true,
+        engagement: true,
+        riskScore: true,
+        deltas: true,
+        tiers: true,
+        flags: true,
+        stability: true,
+      },
+    });
+
+    const inputs: RiskInput[] = students.map((s) => ({
+      studentId: s.id,
+      classId,
+      performance: s.performance ?? 0,
+      attendance: s.attendance ?? 0,
+      engagement: s.engagement ?? 0,
+      riskScore: s.riskScore ?? 0,
+      deltas: (s.deltas as RiskInput["deltas"]) ?? { performance: 0, attendance: 0, engagement: 0, risk: 0 },
+      tiers: (s.tiers as RiskInput["tiers"]) ?? { performance: 1, attendance: 1, engagement: 1, risk: 1 },
+      flags:
+        (s.flags as RiskInput["flags"]) ?? {
+          lowPerformance: false,
+          lowAttendance: false,
+          lowEngagement: false,
+          highRisk: false,
+        },
+      stability: s.stability ?? 0,
+    }));
+
+    return this.risk.getClassRiskEngine(inputs);
   }
 }

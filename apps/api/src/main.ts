@@ -10,8 +10,8 @@ async function bootstrap() {
     new ValidationPipe({ whitelist: true, transform: true, forbidUnknownValues: true }),
   );
   const port = process.env.PORT ?? "3001";
-  await app.listen(port);
-  console.log(`API listening on http://localhost:${port}/api`);
+  await app.listen(port, "0.0.0.0");
+  console.log(`API listening on 0.0.0.0:${port}/api`);
 }
 
 bootstrap();

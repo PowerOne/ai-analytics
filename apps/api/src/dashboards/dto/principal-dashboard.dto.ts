@@ -70,4 +70,7 @@ export class PrincipalDashboardResponse {
 
   @ApiPropertyOptional({ nullable: true })
   aiSummary?: string | null;
+
+  @ApiProperty({ description: "AI-generated school-level intervention suggestions" })
+  schoolInterventions!: unknown[];
 }

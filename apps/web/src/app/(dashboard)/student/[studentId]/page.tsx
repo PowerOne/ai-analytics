@@ -13,13 +13,16 @@ export default function Student360Page() {
   const params = useParams();
   const studentId = String(params.studentId ?? "");
   const { user } = useAuth();
+
   const [data, setData] = useState<Awaited<ReturnType<typeof getStudent360>> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!user?.token || !studentId) return;
+
     let cancelled = false;
+
     (async () => {
       try {
         setLoading(true);
@@ -29,11 +32,14 @@ export default function Student360Page() {
           setError(null);
         }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load");
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to load");
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
+
     return () => {
       cancelled = true;
     };
@@ -56,11 +62,18 @@ export default function Student360Page() {
 
   const cur = data.current;
 
+  // Safe intervention count
+  const interventionCount = Array.isArray(data.interventions)
+    ? data.interventions.length
+    : 0;
+
   return (
     <div className="space-y-8">
       <div>
         <p className="text-xs font-medium uppercase tracking-wide text-sky-400">Student 360</p>
-        <h1 className="text-2xl font-bold text-slate-100">Student {data.studentId.slice(0, 8)}…</h1>
+        <h1 className="text-2xl font-bold text-slate-100">
+          Student {data.studentId.slice(0, 8)}…
+        </h1>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -77,6 +90,7 @@ export default function Student360Page() {
           engagementDelta={data.engagementDelta}
           riskDelta={data.riskDelta}
         />
+
         <div className="rounded-xl border border-slate-700/80 bg-slate-900/60 p-4">
           <p className="text-xs uppercase text-slate-500">Risk tier (current)</p>
           <p className="mt-1 text-xl font-semibold text-slate-100">{cur.riskTier}</p>
@@ -89,12 +103,12 @@ export default function Student360Page() {
       <InterventionsList
         title="Interventions"
         items={
-          data.interventions > 0
+          interventionCount > 0
             ? [
                 {
                   id: "count",
-                  title: `Total interventions involving this student`,
-                  status: `${data.interventions} recorded`,
+                  title: "Total interventions involving this student",
+                  status: `${interventionCount} recorded`,
                   subtitle: "Count from API (all statuses)",
                 },
               ]
@@ -108,7 +122,9 @@ export default function Student360Page() {
       {data.aiSummary && (
         <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">
           <h3 className="text-sm font-semibold text-slate-300">AI summary</h3>
-          <p className="mt-2 whitespace-pre-wrap text-sm text-slate-400">{data.aiSummary}</p>
+          <p className="mt-2 whitespace-pre-wrap text-sm text-slate-400">
+            {data.aiSummary}
+          </p>
         </div>
       )}
     </div>

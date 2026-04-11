@@ -6,10 +6,11 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { UserRole } from "@prisma/client";
+import { UserRole, type WeeklyClassSnapshot, type WeeklyStudentSnapshot } from "@prisma/client";
 import { AxiosError } from "axios";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import { PrismaService } from "../prisma/prisma.service";
 import { RiskService } from "../risk/risk.service";
@@ -45,45 +46,14 @@ function mondayUtcContaining(d: Date): Date {
   return x;
 }
 
-function deltaPerformance(
-  a: number | null | undefined,
-  b: number | null | undefined,
-): number {
-  if (a == null || b == null) return 0;
-  return Math.round((a - b) * 10) / 10;
-}
-
-function deltaAttendance(
-  a: number | null | undefined,
-  b: number | null | undefined,
-): number {
-  if (a == null || b == null) return 0;
-  return Math.round((a - b) * 1000) / 1000;
-}
-
-function deltaEngagement(
-  a: number | null | undefined,
-  b: number | null | undefined,
-): number {
-  if (a == null || b == null) return 0;
-  return Math.round(a - b);
-}
-
-function deltaRisk(
-  a: number | null | undefined,
-  b: number | null | undefined,
-): number {
-  if (a == null || b == null) return 0;
-  return Math.round((a - b) * 10) / 10;
-}
-
-function isHighSnapshotTier(t: string | null | undefined): boolean {
-  return (t ?? "").toUpperCase() === "HIGH";
-}
-
 /** True if attendance dropped by more than 20 percentage points (0–1 scale or 0–100 scale). */
 function attendanceDropAttention(attendanceDelta: number): boolean {
   return attendanceDelta < -0.2 || attendanceDelta < -20;
+}
+
+function deltaCompositeRisk(a: number | null | undefined, b: number | null | undefined): number {
+  if (a == null || b == null) return 0;
+  return Math.round((a - b) * 10) / 10;
 }
 
 @Injectable()
@@ -98,8 +68,97 @@ export class WeeklyReportsService {
     private readonly config: ConfigService,
   ) {}
 
+  private getSnapshotValue(row: any, field: string): number {
+    return row?.[field] ?? 0;
+  }
+
+  private computeStability(t: any, l: any): number {
+    const perfDelta = this.getSnapshotValue(t, "performance") - this.getSnapshotValue(l, "performance");
+    const attDelta = this.getSnapshotValue(t, "attendance") - this.getSnapshotValue(l, "attendance");
+    const engDelta = this.getSnapshotValue(t, "engagement") - this.getSnapshotValue(l, "engagement");
+    const riskDelta = this.getSnapshotValue(l, "riskScore") - this.getSnapshotValue(t, "riskScore");
+
+    // riskDelta is inverted because lower risk is better
+
+    return perfDelta + attDelta + engDelta + riskDelta;
+  }
+
+  private classifyTier(value: number): number {
+    if (value >= 80) return 1;
+    if (value >= 50) return 2;
+    return 3;
+  }
+
+  /** Week-over-week delta from snapshot rows (same rounding as previous delta helpers). */
+  private snapshotFieldDelta(
+    thisSnap: WeeklyClassSnapshot | WeeklyStudentSnapshot | null,
+    lastSnap: WeeklyClassSnapshot | WeeklyStudentSnapshot | null,
+    field: "performance" | "attendance" | "engagement" | "riskScore",
+  ): number {
+    const hasThis = thisSnap != null;
+    const hasLast = lastSnap != null;
+    const tw = this.getSnapshotValue(thisSnap, field);
+    const lw = this.getSnapshotValue(lastSnap, field);
+
+    let raw: number;
+    if (hasThis && hasLast) {
+      raw = tw - lw;
+    } else if (hasThis && !hasLast) {
+      raw = tw;
+    } else if (!hasThis && hasLast) {
+      raw = -lw;
+    } else {
+      return 0;
+    }
+
+    switch (field) {
+      case "performance":
+        return Math.round(raw * 10) / 10;
+      case "attendance":
+        return Math.round(raw * 1000) / 1000;
+      case "engagement":
+        return Math.round(raw);
+      case "riskScore":
+        return Math.round(raw * 10) / 10;
+      default:
+        return 0;
+    }
+  }
+
   private getAiBaseUrl(): string {
     return (this.config.get<string>("AI_SERVICE_URL") ?? "http://ai:8000").replace(/\/$/, "");
+  }
+
+  private async loadClassSnapshots(
+    classId: string,
+    thisWeek: Date,
+    lastWeek: Date,
+  ): Promise<{ thisWeek: WeeklyClassSnapshot | null; lastWeek: WeeklyClassSnapshot | null }> {
+    const [thisWeekSnap, lastWeekSnap] = await Promise.all([
+      this.prisma.weeklyClassSnapshot.findFirst({
+        where: { classId, weekStartDate: thisWeek },
+      }),
+      this.prisma.weeklyClassSnapshot.findFirst({
+        where: { classId, weekStartDate: lastWeek },
+      }),
+    ]);
+    return { thisWeek: thisWeekSnap, lastWeek: lastWeekSnap };
+  }
+
+  private async loadStudentSnapshots(
+    studentId: string,
+    thisWeek: Date,
+    lastWeek: Date,
+  ): Promise<{ thisWeek: WeeklyStudentSnapshot | null; lastWeek: WeeklyStudentSnapshot | null }> {
+    const [thisWeekSnap, lastWeekSnap] = await Promise.all([
+      this.prisma.weeklyStudentSnapshot.findFirst({
+        where: { studentId, weekStartDate: thisWeek },
+      }),
+      this.prisma.weeklyStudentSnapshot.findFirst({
+        where: { studentId, weekStartDate: lastWeek },
+      }),
+    ]);
+    return { thisWeek: thisWeekSnap, lastWeek: lastWeekSnap };
   }
 
   assertTeacherAccess(user: JwtPayload, teacherId: string): void {
@@ -112,7 +171,7 @@ export class WeeklyReportsService {
     try {
       const res = await firstValueFrom(
         this.http.post<{ summary?: string }>(`${this.getAiBaseUrl()}/generate-weekly-teacher-report`, payload, {
-          headers: { "Content-Type": "application/json" },
+          headers: aiHttpHeaders(this.config),
           timeout: this.config.get<number>("AI_SERVICE_TIMEOUT_MS") ?? 60_000,
         }),
       );
@@ -161,50 +220,6 @@ export class WeeklyReportsService {
     const classIdList = classes.map((c) => c.id);
     const studentIdList = [...studentIds];
 
-    const [classThisWeek, classLastWeek, studThisWeek, studLastWeek] = await Promise.all([
-      classIdList.length
-        ? this.prisma.weeklyClassSnapshot.findMany({
-            where: {
-              schoolId,
-              classId: { in: classIdList },
-              weekStartDate: thisWeekMonday,
-            },
-          })
-        : [],
-      classIdList.length
-        ? this.prisma.weeklyClassSnapshot.findMany({
-            where: {
-              schoolId,
-              classId: { in: classIdList },
-              weekStartDate: lastWeekMonday,
-            },
-          })
-        : [],
-      studentIdList.length
-        ? this.prisma.weeklyStudentSnapshot.findMany({
-            where: {
-              schoolId,
-              studentId: { in: studentIdList },
-              weekStartDate: thisWeekMonday,
-            },
-          })
-        : [],
-      studentIdList.length
-        ? this.prisma.weeklyStudentSnapshot.findMany({
-            where: {
-              schoolId,
-              studentId: { in: studentIdList },
-              weekStartDate: lastWeekMonday,
-            },
-          })
-        : [],
-    ]);
-
-    const classThisMap = new Map(classThisWeek.map((r) => [r.classId, r]));
-    const classLastMap = new Map(classLastWeek.map((r) => [r.classId, r]));
-    const studThisMap = new Map(studThisWeek.map((r) => [r.studentId, r]));
-    const studLastMap = new Map(studLastWeek.map((r) => [r.studentId, r]));
-
     await Promise.all([
       ...classIdList.map((classId) =>
         Promise.all([
@@ -222,13 +237,16 @@ export class WeeklyReportsService {
 
     const classSummaries = await Promise.all(
       classes.map(async (cls) => {
-        const t = classThisMap.get(cls.id);
-        const l = classLastMap.get(cls.id);
+        const { thisWeek: t, lastWeek: l } = await this.loadClassSnapshots(
+          cls.id,
+          thisWeekMonday,
+          lastWeekMonday,
+        );
 
-        const performanceDelta = deltaPerformance(t?.performance, l?.performance);
-        const attendanceDelta = deltaAttendance(t?.attendance, l?.attendance);
-        const engagementDelta = deltaEngagement(t?.engagement, l?.engagement);
-        const riskDelta = deltaRisk(t?.riskScore, l?.riskScore);
+        const performanceDelta = this.snapshotFieldDelta(t, l, "performance");
+        const attendanceDelta = this.snapshotFieldDelta(t, l, "attendance");
+        const engagementDelta = this.snapshotFieldDelta(t, l, "engagement");
+        const riskDelta = this.snapshotFieldDelta(t, l, "riskScore");
 
         const newInterventions = await this.prisma.intervention.count({
           where: {
@@ -260,13 +278,16 @@ export class WeeklyReportsService {
 
     const attentionRows = await Promise.all(
       studentIdList.map(async (sid) => {
-        const st = studThisMap.get(sid);
-        const lw = studLastMap.get(sid);
+        const { thisWeek: st, lastWeek: lw } = await this.loadStudentSnapshots(
+          sid,
+          thisWeekMonday,
+          lastWeekMonday,
+        );
 
-        const performanceDelta = deltaPerformance(st?.performance, lw?.performance);
-        const attendanceDelta = deltaAttendance(st?.attendance, lw?.attendance);
-        const engagementDelta = deltaEngagement(st?.engagement, lw?.engagement);
-        const riskDelta = deltaRisk(st?.riskScore, lw?.riskScore);
+        const performanceDelta = this.snapshotFieldDelta(st, lw, "performance");
+        const attendanceDelta = this.snapshotFieldDelta(st, lw, "attendance");
+        const engagementDelta = this.snapshotFieldDelta(st, lw, "engagement");
+        const riskDelta = this.snapshotFieldDelta(st, lw, "riskScore");
 
         const interventionsThisWeek = await this.prisma.intervention.count({
           where: {
@@ -277,17 +298,33 @@ export class WeeklyReportsService {
           },
         });
 
-        const riskTierThisWeek = st?.riskTier ?? null;
-        const riskTierLastWeek = lw?.riskTier ?? null;
+        const performanceTier = this.classifyTier(this.getSnapshotValue(st, "performance"));
+        const attendanceTier = this.classifyTier(this.getSnapshotValue(st, "attendance"));
+        const engagementTier = this.classifyTier(this.getSnapshotValue(st, "engagement"));
+        const riskTier = this.classifyTier(this.getSnapshotValue(st, "riskScore"));
+
+        const performanceTierLastWeek = this.classifyTier(this.getSnapshotValue(lw, "performance"));
+        const attendanceTierLastWeek = this.classifyTier(this.getSnapshotValue(lw, "attendance"));
+        const engagementTierLastWeek = this.classifyTier(this.getSnapshotValue(lw, "engagement"));
+        const riskTierLastWeek = this.classifyTier(this.getSnapshotValue(lw, "riskScore"));
+
+        const riskEngineDelta = deltaCompositeRisk(st?.riskComposite, lw?.riskComposite);
 
         const needsAttention =
-          (isHighSnapshotTier(riskTierThisWeek) && !isHighSnapshotTier(riskTierLastWeek)) ||
+          (riskTier === 3 && riskTierLastWeek !== 3) ||
+          (performanceTier === 3 && performanceTierLastWeek !== 3) ||
+          (attendanceTier === 3 && attendanceTierLastWeek !== 3) ||
+          (engagementTier === 3 && engagementTierLastWeek !== 3) ||
+          (st?.riskCategory ?? "").toLowerCase() === "high" ||
+          riskEngineDelta > 10 ||
           performanceDelta < -10 ||
           attendanceDropAttention(attendanceDelta) ||
           engagementDelta < -30 ||
           interventionsThisWeek > 0;
 
         if (!needsAttention) return null;
+
+        const stability = this.computeStability(st, lw);
 
         return {
           studentId: sid,
@@ -297,6 +334,9 @@ export class WeeklyReportsService {
           engagementDelta,
           riskDelta,
           interventionsThisWeek,
+          stability,
+          riskEngineDelta,
+          interventions: [] as unknown[],
         } satisfies StudentAttentionSummary;
       }),
     );

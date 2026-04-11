@@ -20,4 +20,7 @@ export class SchoolTrendSummary {
       "Count of students in the HIGH risk band (current snapshot; use as proxy when historical “new high-risk” is unavailable)",
   })
   highRiskNew!: number;
+
+  @ApiProperty({ description: "thisWeek.riskComposite − lastWeek.riskComposite (Risk Engine)" })
+  riskCompositeDelta!: number;
 }

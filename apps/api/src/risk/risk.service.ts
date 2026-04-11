@@ -5,6 +5,9 @@ import type { ClassRiskResponse } from "./dto/class-risk.dto";
 import type { StudentRiskResponse } from "./dto/student-risk.dto";
 import { RiskLevel } from "./dto/risk-level.enum";
 
+import { RiskEngineService } from "./risk-engine.service";
+import { RiskInput, RiskOutput } from "./risk-engine.types";
+
 const WEIGHT_ENGAGEMENT = 0.4;
 const WEIGHT_ATTENDANCE = 0.3;
 const WEIGHT_PERFORMANCE = 0.3;
@@ -83,14 +86,65 @@ export function riskLevelFromOverall(overall: number): RiskLevel {
 
 @Injectable()
 export class RiskService {
-  constructor(private readonly analytics: AnalyticsService) {}
+  constructor(
+    private readonly analytics: AnalyticsService,
+    private readonly riskEngine: RiskEngineService,
+  ) {}
 
-  async getClassRisk(_schoolId: string, classId: string, user: JwtPayload): Promise<ClassRiskResponse> {
+  /** NEW: Risk Engine wrapper */
+  getStudentRiskEngine(input: RiskInput): RiskOutput {
+    return this.riskEngine.computeRisk(input);
+  }
+
+  /** NEW: Class-level risk aggregation using the Risk Engine */
+  getClassRiskEngine(students: RiskInput[]) {
+    if (!students.length) {
+      return {
+        classRisk: 0,
+        distribution: { low: 0, medium: 0, high: 0 },
+        studentRisks: [],
+      };
+    }
+
+    const studentRisks = students.map((s) => {
+      const result = this.riskEngine.computeRisk(s);
+      return {
+        studentId: s.studentId,
+        compositeRisk: result.compositeRisk,
+        category: result.category,
+        reasons: result.reasons,
+      };
+    });
+
+    const total = studentRisks.reduce((sum, r) => sum + r.compositeRisk, 0);
+    const classRisk = Math.round(total / studentRisks.length);
+
+    const distribution = {
+      low: studentRisks.filter((r) => r.category === "low").length,
+      medium: studentRisks.filter((r) => r.category === "medium").length,
+      high: studentRisks.filter((r) => r.category === "high").length,
+    };
+
+    return {
+      classRisk,
+      distribution,
+      studentRisks,
+    };
+  }
+
+  async getClassRisk(
+    _schoolId: string,
+    classId: string,
+    user: JwtPayload,
+  ): Promise<ClassRiskResponse> {
     const a = await this.analytics.getClassAnalytics(classId, user);
+
     const engagement = engagementRiskFromScore(a.engagementScore ?? 0);
     const attendance = classAttendanceRisk(a.attendanceRate ?? 0);
     const performance = classPerformanceRisk(a.averageScore ?? 0);
+
     const overall = weightedOverall(engagement, attendance, performance);
+
     return {
       engagement,
       attendance,
@@ -100,14 +154,23 @@ export class RiskService {
     };
   }
 
-  async getStudentRisk(_schoolId: string, studentId: string, user: JwtPayload): Promise<StudentRiskResponse> {
+  async getStudentRisk(
+    _schoolId: string,
+    studentId: string,
+    user: JwtPayload,
+  ): Promise<StudentRiskResponse> {
     const a = await this.analytics.getStudentAnalytics(studentId, user);
+
     const engagement = engagementRiskFromScore(a.engagementScore ?? 0);
+
     const avgAtt = averageTrendValues(a.attendanceTimeline ?? []);
     const attendance = studentAttendanceRiskFromTimeline(avgAtt);
+
     const avgScore = averageTrendValues(a.scoreTimeline ?? []);
     const performance = studentPerformanceRiskFromTimeline(avgScore);
+
     const overall = weightedOverall(engagement, attendance, performance);
+
     return {
       engagement,
       attendance,

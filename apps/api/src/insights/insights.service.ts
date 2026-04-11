@@ -9,6 +9,7 @@ import { ConfigService } from "@nestjs/config";
 import { AxiosError } from "axios";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import type { AIInsightsRequest } from "./dto/ai-request.dto";
 import type { ClassInsightsResponse } from "./dto/class-insights.dto";
@@ -58,7 +59,7 @@ export class InsightsService {
     try {
       const response = await firstValueFrom(
         this.http.post<unknown>(url, request, {
-          headers: { "Content-Type": "application/json" },
+          headers: aiHttpHeaders(this.config),
           timeout,
         }),
       );
