@@ -2,7 +2,7 @@
 Raw SQL to pull per-(student, class) aggregates aligned with Prisma table names.
 
 Maps to: students, classes, enrollments, assessments, assessment_results,
-attendance_records, assignment_submissions, assignments, lms_activity_events.
+attendance_records, lms_activity_events. (Assignment tables are not in the Prisma schema.)
 """
 
 # Per enrollment row: base keys + raw inputs for Python feature engineering
@@ -46,24 +46,8 @@ SELECT
       AND l.deleted_at IS NULL
       AND l.occurred_at >= NOW() - INTERVAL '120 days'
   ) AS lms_event_count,
-  (
-    SELECT COUNT(*)::float
-    FROM assignment_submissions sub
-    INNER JOIN assignments asg ON asg.id = sub.assignment_id AND asg.school_id = sub.school_id
-    WHERE sub.school_id = e.school_id
-      AND sub.student_id = e.student_id
-      AND sub.deleted_at IS NULL
-      AND asg.deleted_at IS NULL
-      AND asg.class_id = e.class_id
-      AND sub.status IN ('submitted', 'graded', 'returned')
-  ) AS submissions_count,
-  (
-    SELECT COUNT(*)::float
-    FROM assignments asg
-    WHERE asg.school_id = e.school_id
-      AND asg.deleted_at IS NULL
-      AND asg.class_id = e.class_id
-  ) AS assignments_count
+  0::float AS submissions_count,
+  0::float AS assignments_count
 FROM enrollments e
 WHERE e.school_id = CAST(:school_id AS uuid)
   AND e.deleted_at IS NULL
