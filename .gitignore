@@ -13,3 +13,7 @@ __pycache__
 venv
 .idea
 .DS_Store
+
+# Prisma: generated client + vendored copies under the API app (regenerate: pnpm --filter @learning-analytics/api run prisma:generate)
+apps/api/@prisma/
+apps/api/.prisma/

@@ -37,6 +37,8 @@ model User {
 model School {
   id        String    @id @default(uuid()) @db.Uuid
   name      String
+  address   String?
+  code      String?
   slug      String?   @unique
   timezone  String    @default("UTC")
   metadata  Json      @default("{}")
@@ -103,19 +105,29 @@ model Term {
 
 model Teacher {
   id             String    @id @default(uuid()) @db.Uuid
-  schoolId       String    @map("school_id") @db.Uuid
-  school         School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  // Basic fields used by seed.js
+  name           String?
+  email          String?
+  subject        String?
+
+  // Relation to School
+  schoolId       String?   @map("school_id") @db.Uuid
+  school         School?   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+
+  // Enterprise metadata fields
   externalSource String?   @map("external_source")
   externalId     String?   @map("external_id")
   givenName      String?   @map("given_name")
   familyName     String?   @map("family_name")
   displayName    String?   @map("display_name")
-  email          String?
   metadata       Json      @default("{}")
+
   createdAt      DateTime  @default(now()) @map("created_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")
   deletedAt      DateTime? @map("deleted_at")
 
+  // Relations
   users          User[]
   primaryClasses Class[]        @relation("PrimaryTeacher")
   interventions  Intervention[]

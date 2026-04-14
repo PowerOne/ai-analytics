@@ -1,5 +1,77 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { TrendPoint } from "../../analytics/dto/common.dto";
 import { HeatmapCell } from "../../lms-heatmaps/dto/heatmap-cell.dto";
+
+export class Student360IdentityDto {
+  @ApiProperty()
+  displayName!: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  givenName!: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  familyName!: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  gradeLevel!: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  email!: string | null;
+}
+
+export class Student360ClassDto {
+  @ApiProperty({ format: "uuid" })
+  id!: string;
+
+  @ApiProperty()
+  name!: string;
+
+  @ApiProperty()
+  subjectName!: string;
+
+  @ApiProperty()
+  subjectCode!: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  sectionCode!: string | null;
+
+  @ApiProperty()
+  termLabel!: string;
+}
+
+export class Student360TeacherDto {
+  @ApiProperty({ format: "uuid" })
+  id!: string;
+
+  @ApiProperty()
+  name!: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  email!: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  subject!: string | null;
+}
+
+export class Student360AssessmentDto {
+  @ApiProperty({ format: "uuid" })
+  id!: string;
+
+  @ApiProperty({ format: "uuid" })
+  assessmentId!: string;
+
+  @ApiProperty()
+  title!: string;
+
+  @ApiPropertyOptional({ nullable: true })
+  scorePercent!: number | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  submittedAt!: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  className!: string | null;
+}
 
 export class Student360CurrentBlockDto {
   @ApiProperty({ description: "Current mean performance (0–100) from analytics" })
@@ -57,6 +129,30 @@ export class Student360RiskEngineHistoryDto {
 export class Student360DashboardResponse {
   @ApiProperty({ format: "uuid" })
   studentId!: string;
+
+  @ApiProperty({ type: Student360IdentityDto })
+  identity!: Student360IdentityDto;
+
+  @ApiProperty({ type: [Student360ClassDto] })
+  classes!: Student360ClassDto[];
+
+  @ApiProperty({ type: [Student360TeacherDto] })
+  teachers!: Student360TeacherDto[];
+
+  @ApiProperty({ type: [Student360AssessmentDto] })
+  assessments!: Student360AssessmentDto[];
+
+  @ApiProperty({ type: [TrendPoint], description: "Daily average assessment score %" })
+  scoreTimeline!: TrendPoint[];
+
+  @ApiProperty({
+    type: [TrendPoint],
+    description: "Daily attendance rate (0–1 present-like / sessions)",
+  })
+  attendanceTimeline!: TrendPoint[];
+
+  @ApiProperty({ description: "Share of assessments with a submission timestamp (0–1)" })
+  submissionRate!: number;
 
   @ApiProperty()
   performanceDelta!: number;

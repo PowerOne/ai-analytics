@@ -8,6 +8,7 @@ import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { SchoolParamGuard } from "../common/guards/school-param.guard";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import { DashboardsService } from "./dashboards.service";
+import { Class360DashboardResponse } from "./dto/class360-dashboard.dto";
 import { CohortDashboardResponse } from "./dto/cohort-dashboard.dto";
 import { PrincipalDashboardResponse } from "./dto/principal-dashboard.dto";
 import { Student360DashboardResponse } from "./dto/student360-dashboard.dto";
@@ -73,5 +74,17 @@ export class DashboardsController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.dashboards.getStudent360(schoolId, studentId, user);
+  }
+
+  @Get("dashboards/classes/:classId")
+  @Roles(UserRole.ADMIN, UserRole.PRINCIPAL, UserRole.TEACHER)
+  @ApiOperation({ summary: "Class 360: roster, subject/term, analytics and risk summaries" })
+  @ApiOkResponse({ type: Class360DashboardResponse })
+  getClass360(
+    @Param("schoolId") schoolId: string,
+    @Param("classId") classId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.dashboards.getClass360(schoolId, classId, user);
   }
 }

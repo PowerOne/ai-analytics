@@ -19,6 +19,7 @@ import { RiskModule } from "./risk/risk.module";
 import { SnapshotsModule } from "./snapshots/snapshots.module";
 import { StudentsModule } from "./students/students.module";
 import { TeacherAnalyticsModule } from "./teacher-analytics/teacher-analytics.module";
+import { TeachersModule } from "./teachers/teachers.module";
 import { TrendsModule } from "./trends/trends.module";
 import { WeeklyReportsModule } from "./weekly-reports/weekly-reports.module";
 
@@ -42,6 +43,7 @@ import { WeeklyReportsModule } from "./weekly-reports/weekly-reports.module";
     HealthModule,
     AuthModule,
     StudentsModule,
+    TeachersModule,
     ClassesModule,
     AssessmentsModule,
     AttendanceModule,

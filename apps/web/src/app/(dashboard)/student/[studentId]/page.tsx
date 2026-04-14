@@ -71,9 +71,7 @@ export default function Student360Page() {
     <div className="space-y-8">
       <div>
         <p className="text-xs font-medium uppercase tracking-wide text-sky-400">Student 360</p>
-        <h1 className="text-2xl font-bold text-slate-100">
-          Student {data.studentId.slice(0, 8)}…
-        </h1>
+        <h1 className="text-2xl font-bold text-slate-100">{data.identity.displayName}</h1>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

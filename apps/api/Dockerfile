@@ -34,6 +34,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app /app
+COPY apps/api/docker-entrypoint.sh /app/apps/api/docker-entrypoint.sh
 
 EXPOSE 3001
-ENTRYPOINT ["/bin/sh", "/app/apps/api/docker-entrypoint.sh"]
+ENTRYPOINT ["/bin/bash", "/app/apps/api/docker-entrypoint.sh"]

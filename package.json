@@ -13,11 +13,20 @@
     "dev": "pnpm --parallel --filter @learning-analytics/api --filter @learning-analytics/web dev",
     "dev:api": "pnpm --filter @learning-analytics/api dev",
     "dev:web": "pnpm --filter @learning-analytics/web dev",
+    "dev:lap": "pnpm --filter @learning-analytics/lap dev",
     "build": "pnpm --filter @learning-analytics/shared build && pnpm --filter @learning-analytics/api build && pnpm --filter @learning-analytics/web build",
     "lint": "pnpm --filter @learning-analytics/api lint && pnpm --filter @learning-analytics/web lint",
     "clean": "npx rimraf \"apps/*/node_modules\" \"packages/*/node_modules\" node_modules dist .next"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "prisma": "5.22.0",
+    "ts-node": "^10.9.2"
+  },
+  "prisma": {
+    "seed": "ts-node apps/api/prisma/seed.js",
+    "schema": "apps/api/prisma/schema.prisma"
   }
 }

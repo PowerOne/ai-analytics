@@ -6,6 +6,11 @@ export interface LmsHeatmapCell {
   eventTypes: Record<string, number>;
 }
 
+export interface AnalyticsTrendPoint {
+  date: string;
+  value: number;
+}
+
 export interface StudentAttentionSummary {
   studentId: string;
   name: string;
@@ -99,6 +104,33 @@ export interface CohortDashboardResponse {
 
 export interface Student360DashboardResponse {
   studentId: string;
+  identity: {
+    displayName: string;
+    givenName: string | null;
+    familyName: string | null;
+    gradeLevel: string | null;
+    email: string | null;
+  };
+  classes: {
+    id: string;
+    name: string;
+    subjectName: string;
+    subjectCode: string;
+    sectionCode: string | null;
+    termLabel: string;
+  }[];
+  teachers: { id: string; name: string; email: string | null; subject: string | null }[];
+  assessments: {
+    id: string;
+    assessmentId: string;
+    title: string;
+    scorePercent: number | null;
+    submittedAt: string | null;
+    className: string | null;
+  }[];
+  scoreTimeline: AnalyticsTrendPoint[];
+  attendanceTimeline: AnalyticsTrendPoint[];
+  submissionRate: number;
   performanceDelta: number;
   attendanceDelta: number;
   engagementDelta: number;

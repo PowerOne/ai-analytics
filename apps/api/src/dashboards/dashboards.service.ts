@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { UserRole } from "@prisma/client";
+import { Prisma, UserRole } from "@prisma/client";
 import { AxiosError } from "axios";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
@@ -20,6 +20,7 @@ import { RiskInput, type RiskOutput } from "../risk/risk-engine.types";
 import type { SchoolTrendSummary } from "../principal-reports/dto/school-trend.dto";
 import type { CohortDashboardResponse } from "./dto/cohort-dashboard.dto";
 import type { PrincipalDashboardResponse } from "./dto/principal-dashboard.dto";
+import type { Class360DashboardResponse } from "./dto/class360-dashboard.dto";
 import type { Student360DashboardResponse } from "./dto/student360-dashboard.dto";
 import type { TeacherDashboardResponse } from "./dto/teacher-dashboard.dto";
 import type { StudentAttentionSummary } from "../weekly-reports/dto/student-attention-summary.dto";
@@ -841,10 +842,82 @@ export class DashboardsService {
   ): Promise<Student360DashboardResponse> {
     await this.assertStudentVisible(user, schoolId, studentId);
 
+    const enrollmentClassWhere =
+      user.role === UserRole.TEACHER && user.teacherId
+        ? { deletedAt: null, primaryTeacherId: user.teacherId }
+        : { deletedAt: null };
+
     const student = await this.prisma.student.findFirst({
       where: { id: studentId, schoolId, deletedAt: null },
+      include: {
+        enrollments: {
+          where: {
+            schoolId,
+            deletedAt: null,
+            status: "active",
+            class: enrollmentClassWhere,
+          },
+          include: {
+            class: {
+              include: {
+                subject: true,
+                term: true,
+                primaryTeacher: true,
+              },
+            },
+          },
+        },
+      },
     });
     if (!student) throw new NotFoundException("Student not found");
+
+    const displayName =
+      student.displayName?.trim() ||
+      [student.givenName, student.familyName].filter(Boolean).join(" ").trim() ||
+      "Student";
+
+    const identity = {
+      displayName,
+      givenName: student.givenName,
+      familyName: student.familyName,
+      gradeLevel: student.gradeLevel,
+      email: student.email,
+    };
+
+    const classes = student.enrollments.map((e) => ({
+      id: e.class.id,
+      name: e.class.name,
+      subjectName: e.class.subject.name,
+      subjectCode: e.class.subject.code,
+      sectionCode: e.class.sectionCode,
+      termLabel: e.class.term.label,
+    }));
+
+    const teacherById = new Map<string, { id: string; name: string; email: string | null; subject: string | null }>();
+    for (const e of student.enrollments) {
+      const t = e.class.primaryTeacher;
+      if (!t || t.deletedAt) continue;
+      if (teacherById.has(t.id)) continue;
+      const tName =
+        t.displayName?.trim() ||
+        [t.givenName, t.familyName].filter(Boolean).join(" ").trim() ||
+        "Teacher";
+      teacherById.set(t.id, { id: t.id, name: tName, email: t.email, subject: null });
+    }
+    const teachers = [...teacherById.values()];
+
+    const assessmentWhere: Prisma.AssessmentResultWhereInput = {
+      schoolId,
+      studentId,
+      deletedAt: null,
+      assessment: {
+        schoolId,
+        deletedAt: null,
+        ...(user.role === UserRole.TEACHER && user.teacherId
+          ? { class: { primaryTeacherId: user.teacherId, deletedAt: null } }
+          : {}),
+      },
+    };
 
     // Build RiskInput for the Risk Engine
     const riskInput: RiskInput = {
@@ -884,7 +957,7 @@ export class DashboardsService {
     const fromStr = formatYmd(heatmapFrom);
     const toStr = formatYmd(now);
 
-    const [stThis, stLast, a, r, hm, interventionCount] = await Promise.all([
+    const [stThis, stLast, a, r, hm, interventionCount, assessmentRows] = await Promise.all([
       this.prisma.weeklyStudentSnapshot.findFirst({
         where: { schoolId, studentId, weekStartDate: thisWeekMonday },
       }),
@@ -895,7 +968,24 @@ export class DashboardsService {
       this.risk.getStudentRisk(schoolId, studentId, scoped),
       this.lmsHeatmaps.getStudentHeatmap(schoolId, studentId, scoped, fromStr, toStr),
       this.prisma.intervention.count({ where: { schoolId, studentId } }),
+      this.prisma.assessmentResult.findMany({
+        where: assessmentWhere,
+        orderBy: [{ submittedAt: "desc" }, { createdAt: "desc" }],
+        take: 20,
+        include: {
+          assessment: { include: { class: { select: { name: true } } } },
+        },
+      }),
     ]);
+
+    const assessments = assessmentRows.map((row) => ({
+      id: row.id,
+      assessmentId: row.assessmentId,
+      title: row.assessment.title,
+      scorePercent: row.scorePercent != null ? Number(row.scorePercent) : null,
+      submittedAt: row.submittedAt?.toISOString() ?? null,
+      className: row.assessment.class?.name ?? null,
+    }));
 
     const performanceDelta = deltaPerformance(stThis?.performance, stLast?.performance);
     const attendanceDelta = deltaAttendance(stThis?.attendance, stLast?.attendance);
@@ -934,6 +1024,13 @@ export class DashboardsService {
 
     return {
       studentId,
+      identity,
+      classes,
+      teachers,
+      assessments,
+      scoreTimeline: a.scoreTimeline ?? [],
+      attendanceTimeline: a.attendanceTimeline ?? [],
+      submissionRate: a.submissionRate ?? 0,
       performanceDelta,
       attendanceDelta,
       engagementDelta,
@@ -950,6 +1047,172 @@ export class DashboardsService {
       interventions: interventionsFromAi,
       heatmap: { daily: hm.heatmap, weekly: hm.weekly },
       aiSummary,
+    };
+  }
+
+  async getClass360(schoolId: string, classId: string, user: JwtPayload): Promise<Class360DashboardResponse> {
+    const cls = await this.prisma.class.findFirst({
+      where: { id: classId, schoolId, deletedAt: null },
+      include: {
+        subject: true,
+        term: true,
+        primaryTeacher: true,
+        enrollments: {
+          where: { status: "active", deletedAt: null },
+          include: {
+            student: {
+              select: {
+                id: true,
+                displayName: true,
+                givenName: true,
+                familyName: true,
+                gradeLevel: true,
+                riskScore: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!cls) throw new NotFoundException("Class not found");
+    if (user.role === UserRole.TEACHER && user.teacherId && cls.primaryTeacherId !== user.teacherId) {
+      throw new ForbiddenException("You can only access your own classes");
+    }
+
+    const scoped =
+      user.role === UserRole.TEACHER && user.teacherId
+        ? asTeacherJwt(user, schoolId, user.teacherId)
+        : toPrincipalScope(user, schoolId);
+
+    const now = new Date();
+    const thisWeekMonday = mondayUtcContaining(now);
+    const lastWeekMonday = new Date(thisWeekMonday);
+    lastWeekMonday.setUTCDate(lastWeekMonday.getUTCDate() - 7);
+
+    const [classThis, classLast, analytics, classRisk, engineAgg] = await Promise.all([
+      this.prisma.weeklyClassSnapshot.findFirst({
+        where: { schoolId, classId, weekStartDate: thisWeekMonday },
+      }),
+      this.prisma.weeklyClassSnapshot.findFirst({
+        where: { schoolId, classId, weekStartDate: lastWeekMonday },
+      }),
+      this.analytics.getClassAnalytics(classId, scoped),
+      this.risk.getClassRisk(schoolId, classId, scoped),
+      this.getClassRiskEngine(classId),
+    ]);
+
+    const snapThis = classThis
+      ? {
+          weekStartDate: classThis.weekStartDate.toISOString(),
+          performance: classThis.performance,
+          attendance: classThis.attendance,
+          engagement: classThis.engagement,
+          riskScore: classThis.riskScore,
+          riskComposite: classThis.riskComposite,
+          riskCategory: classThis.riskCategory,
+        }
+      : null;
+    const snapLast = classLast
+      ? {
+          weekStartDate: classLast.weekStartDate.toISOString(),
+          performance: classLast.performance,
+          attendance: classLast.attendance,
+          engagement: classLast.engagement,
+          riskScore: classLast.riskScore,
+          riskComposite: classLast.riskComposite,
+          riskCategory: classLast.riskCategory,
+        }
+      : null;
+
+    const performanceDelta = deltaPerformance(classThis?.performance, classLast?.performance);
+    const attendanceDelta = deltaAttendance(classThis?.attendance, classLast?.attendance);
+    const engagementDelta = deltaEngagement(classThis?.engagement, classLast?.engagement);
+    const riskDelta = deltaRisk(classThis?.riskScore, classLast?.riskScore);
+    const riskCompositeDelta = deltaCompositeRisk(classThis?.riskComposite, classLast?.riskComposite);
+
+    const t = cls.primaryTeacher;
+    const teacher =
+      t && !t.deletedAt
+        ? {
+            id: t.id,
+            name:
+              t.displayName?.trim() ||
+              [t.givenName, t.familyName].filter(Boolean).join(" ").trim() ||
+              "Teacher",
+            email: t.email,
+          }
+        : null;
+
+    const students = cls.enrollments.map((e) => {
+      const s = e.student;
+      const displayName =
+        s.displayName?.trim() ||
+        [s.givenName, s.familyName].filter(Boolean).join(" ").trim() ||
+        s.id;
+      return {
+        id: s.id,
+        displayName,
+        gradeLevel: s.gradeLevel,
+        riskScore: s.riskScore != null ? Number(s.riskScore) : null,
+      };
+    });
+
+    return {
+      classInfo: {
+        id: cls.id,
+        name: cls.name,
+        sectionCode: cls.sectionCode,
+        room: cls.room,
+      },
+      teacher,
+      subject: {
+        id: cls.subject.id,
+        code: cls.subject.code,
+        name: cls.subject.name,
+      },
+      term: {
+        id: cls.term.id,
+        label: cls.term.label,
+        startsOn: cls.term.startsOn.toISOString().slice(0, 10),
+        endsOn: cls.term.endsOn.toISOString().slice(0, 10),
+      },
+      students,
+      studentCount: students.length,
+      averageScore: analytics.averageScore,
+      submissionRate: analytics.submissionRate,
+      scoreTrend: analytics.scoreTrend ?? [],
+      riskSummary: {
+        liveOverall: classRisk.overall,
+        liveLevel: riskTierLabel(classRisk.level),
+        liveEngagementRisk: classRisk.engagement,
+        liveAttendanceRisk: classRisk.attendance,
+        livePerformanceRisk: classRisk.performance,
+        averageEngineRisk: engineAgg.classRisk,
+        studentsLow: engineAgg.distribution.low,
+        studentsMedium: engineAgg.distribution.medium,
+        studentsHigh: engineAgg.distribution.high,
+        snapshotThisWeek: snapThis,
+        snapshotLastWeek: snapLast,
+        deltas: {
+          performance: performanceDelta,
+          attendance: attendanceDelta,
+          engagement: engagementDelta,
+          risk: riskDelta,
+          riskComposite: riskCompositeDelta,
+        },
+      },
+      attendanceSummary: {
+        currentRate: analytics.attendanceRate,
+        snapshotThisWeek: classThis?.attendance ?? null,
+        snapshotLastWeek: classLast?.attendance ?? null,
+        delta: attendanceDelta,
+      },
+      engagementSummary: {
+        currentScore: analytics.engagementScore,
+        snapshotThisWeek: classThis?.engagement ?? null,
+        snapshotLastWeek: classLast?.engagement ?? null,
+        delta: engagementDelta,
+      },
     };
   }
 

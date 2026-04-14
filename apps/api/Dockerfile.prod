@@ -1,0 +1,45 @@
+# -----------------------------
+# 1. Builder Stage
+# -----------------------------
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Install pnpm globally
+RUN npm install -g pnpm
+
+# Copy workspace root files
+COPY pnpm-workspace.yaml pnpm-workspace.yaml
+COPY pnpm-lock.yaml pnpm-lock.yaml
+COPY package.json package.json
+
+# Copy the entire monorepo BEFORE installing dependencies
+COPY . .
+
+# Install ALL workspace dependencies (including Prisma)
+RUN pnpm install --frozen-lockfile
+
+# Generate Prisma Client explicitly (ensures schema is fresh)
+WORKDIR /app/apps/api
+RUN pnpm prisma generate
+
+# Build the API
+RUN pnpm build
+
+
+# -----------------------------
+# 2. Production Stage
+# -----------------------------
+FROM node:18-alpine AS production
+
+WORKDIR /app
+
+RUN npm install -g pnpm
+
+# Copy built API output
+COPY --from=builder /app/apps/api/dist ./dist
+COPY --from=builder /app/apps/api/prisma ./prisma
+
+EXPOSE 3001
+
+CMD ["node", "dist/main.js"]
