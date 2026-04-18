@@ -3,18 +3,11 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "build": "prisma generate && nest build",
+    "build": "nest build",
     "dev": "nest start --watch",
     "start": "node dist/main.js",
     "start:prod": "node dist/main.js",
-    "lint": "eslint \"src/**/*.ts\"",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:push": "prisma db push",
-    "prisma:seed": "prisma db seed"
-  },
-  "prisma": {
-    "seed": "node ./prisma/seed.js"
+    "lint": "eslint \"src/**/*.ts\""
   },
   "dependencies": {
     "@learning-analytics/shared": "workspace:*",
@@ -27,15 +20,13 @@
     "@nestjs/platform-express": "^10.4.15",
     "@nestjs/schedule": "^6.1.1",
     "@nestjs/swagger": "^8.1.1",
-    "@prisma/client": "5.22.0",
     "axios": "^1.7.9",
     "bcryptjs": "^3.0.3",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "mysql2": "^3.22.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
-    "pg": "^8.13.1",
-    "prisma": "5.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
@@ -47,6 +38,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
     "@types/passport-jwt": "^4.0.1",
+    "@types/react": "^19.0.1",
     "eslint": "^10.2.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.4.0",

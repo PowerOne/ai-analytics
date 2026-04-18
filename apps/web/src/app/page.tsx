@@ -15,7 +15,7 @@ export default function HomePage() {
           Sign in
         </Link>
         <p className="text-center text-xs text-slate-500">
-          Demo: choose Admin or Teacher on the login page (mock session).
+          Administrators and principals use the admin console; teachers manage classes and student detail.
         </p>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { Controller, Get, UseGuards } from "@nestjs/common";
-import { UserRole } from "@prisma/client";
+import { UserRole } from "../common/user-role";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import { Roles } from "../auth/decorators/roles.decorator";

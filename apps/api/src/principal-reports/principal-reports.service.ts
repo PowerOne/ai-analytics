@@ -1,20 +1,19 @@
 import { HttpService } from "@nestjs/axios";
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { UserRole } from "@prisma/client";
 import { AxiosError } from "axios";
+import type { RowDataPacket } from "mysql2/promise";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
 import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import type { TrendPoint } from "../analytics/dto/common.dto";
-import type { CohortSummaryResponse } from "../cohort-analytics/dto/cohort-summary.dto";
-import { CohortAnalyticsService } from "../cohort-analytics/cohort-analytics.service";
+import { UserRole } from "../common/user-role";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import { LmsHeatmapsService } from "../lms-heatmaps/lms-heatmaps.service";
-import { PrismaService } from "../prisma/prisma.service";
+import { IntelligenceEngineService } from "../intelligence/intelligence-engine.service";
+import { MySQLService } from "../database/mysql.service";
 import { RiskService } from "../risk/risk.service";
 import { RiskLevel } from "../risk/dto/risk-level.enum";
-import type { CohortSummary } from "./dto/cohort-summary.dto";
 import type { PrincipalReportResponse } from "./dto/principal-report.dto";
 import type { SchoolTrendSummary } from "./dto/school-trend.dto";
 
@@ -78,23 +77,13 @@ function mergeTrendPoints(points: TrendPoint[]): TrendPoint[] {
     .map(([date, { sum, count }]) => ({ date, value: sum / count }));
 }
 
-function mapCohortSummary(r: CohortSummaryResponse, type: "grade" | "subject"): CohortSummary {
-  return {
-    id: r.id,
-    type,
-    name: r.name,
-    performance: r.performance,
-    attendance: r.attendance,
-    engagement: r.engagement,
-    risk: {
-      low: r.risk.low,
-      medium: r.risk.medium,
-      high: r.risk.high,
-      average: r.risk.average,
-    },
-    interventions: r.interventions,
-  };
-}
+type IdRow = RowDataPacket & { id: string };
+
+type CountRow = RowDataPacket & { c: number };
+
+type AvgEngRow = RowDataPacket & { avgEng: number | null };
+
+type TeacherIdRow = RowDataPacket & { teacherId: string };
 
 function heatmapCountDeltaLast7VsPrev7(daily: { date: string; count: number }[] | undefined): number {
   const sorted = [...(daily ?? [])].sort((a, b) => a.date.localeCompare(b.date));
@@ -111,10 +100,10 @@ export class PrincipalReportsService {
   private readonly logger = new Logger(PrincipalReportsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: MySQLService,
     private readonly analytics: AnalyticsService,
     private readonly risk: RiskService,
-    private readonly cohortAnalytics: CohortAnalyticsService,
+    private readonly intelligenceEngine: IntelligenceEngineService,
     private readonly lmsHeatmaps: LmsHeatmapsService,
     private readonly http: HttpService,
     private readonly config: ConfigService,
@@ -133,30 +122,61 @@ export class PrincipalReportsService {
     const now = new Date();
     const lastStart = subDays(now, windowDays);
     const prevStart = subDays(now, windowDays * 2);
-    const [lastAgg, prevAgg] = await Promise.all([
-      this.prisma.lmsActivityEvent.aggregate({
-        where: {
-          schoolId,
-          studentId: { in: studentIds },
-          deletedAt: null,
-          occurredAt: { gte: lastStart },
-        },
-        _avg: { engagementScore: true },
-      }),
-      this.prisma.lmsActivityEvent.aggregate({
-        where: {
-          schoolId,
-          studentId: { in: studentIds },
-          deletedAt: null,
-          occurredAt: { gte: prevStart, lt: lastStart },
-        },
-        _avg: { engagementScore: true },
-      }),
+    const placeholders = studentIds.map(() => "?").join(", ");
+    const baseParams = [schoolId, ...studentIds];
+    const lastSql = `
+      SELECT AVG(engagement_score) AS avgEng
+      FROM lms_activity_events
+      WHERE school_id = ?
+        AND student_id IN (${placeholders})
+        AND deleted_at IS NULL
+        AND occurred_at >= ?
+    `;
+    const prevSql = `
+      SELECT AVG(engagement_score) AS avgEng
+      FROM lms_activity_events
+      WHERE school_id = ?
+        AND student_id IN (${placeholders})
+        AND deleted_at IS NULL
+        AND occurred_at >= ?
+        AND occurred_at < ?
+    `;
+    const [lastPacket, prevPacket] = await Promise.all([
+      this.db.query(lastSql, [...baseParams, lastStart]),
+      this.db.query(prevSql, [...baseParams, prevStart, lastStart]),
     ]);
-    const last = lastAgg._avg.engagementScore ? Number(lastAgg._avg.engagementScore) : 0;
-    const prev = prevAgg._avg.engagementScore ? Number(prevAgg._avg.engagementScore) : 0;
+    const lastRows = lastPacket[0] as AvgEngRow[];
+    const prevRows = prevPacket[0] as AvgEngRow[];
+    const last = lastRows[0]?.avgEng != null ? Number(lastRows[0].avgEng) : 0;
+    const prev = prevRows[0]?.avgEng != null ? Number(prevRows[0].avgEng) : 0;
     if (Math.abs(prev) < 1e-9) return 0;
     return Math.round(((last - prev) / prev) * 1000) / 10;
+  }
+
+  private async principalInterventionCreatedCount(schoolId: string, since: Date): Promise<number> {
+    const sql = `SELECT COUNT(*) AS c FROM interventions WHERE school_id = ? AND created_at >= ?`;
+    const packet = (await this.db.query(sql, [schoolId, since]))[0] as CountRow[];
+    const rows = packet as CountRow[];
+    return Number(rows[0]?.c ?? 0);
+  }
+
+  private async principalInterventionResolvedCount(schoolId: string, since: Date): Promise<number> {
+    const sql = `
+      SELECT COUNT(*) AS c FROM interventions
+      WHERE school_id = ? AND status = 'resolved' AND updated_at >= ?
+    `;
+    const packet = (await this.db.query(sql, [schoolId, since]))[0] as CountRow[];
+    const rows = packet as CountRow[];
+    return Number(rows[0]?.c ?? 0);
+  }
+
+  private async principalInterventionsForTeacherLoad(schoolId: string, since: Date): Promise<TeacherIdRow[]> {
+    const sql = `
+      SELECT teacher_id AS teacherId FROM interventions
+      WHERE school_id = ? AND created_at >= ?
+    `;
+    const packet = (await this.db.query(sql, [schoolId, since]))[0] as TeacherIdRow[];
+    return packet as TeacherIdRow[];
   }
 
   private async tryPrincipalAiSummary(payload: Record<string, unknown>): Promise<string | null> {
@@ -227,30 +247,25 @@ export class PrincipalReportsService {
     const weekAgo = subDays(now, 7);
     const heatmapFrom = subDays(now, 14);
 
-    const [classes, students, subjects] = await Promise.all([
-      this.prisma.class.findMany({
-        where: { schoolId },
-        include: {
-          subject: true,
-          enrollments: {
-            where: { status: "active", deletedAt: null },
-            include: { student: true },
-          },
-        },
-      }),
-      this.prisma.student.findMany({ where: { schoolId } }),
-      this.prisma.subject.findMany({ where: { schoolId } }),
+    const [classesPacket, studentsPacket, subjectsPacket] = await Promise.all([
+      this.db.query(`SELECT id FROM classes WHERE school_id = ?`, [schoolId]),
+      this.db.query(`SELECT id FROM students WHERE school_id = ?`, [schoolId]),
+      this.db.query(`SELECT id FROM subjects WHERE school_id = ?`, [schoolId]),
     ]);
+    const classes = classesPacket[0] as IdRow[];
+    const students = studentsPacket[0] as IdRow[];
+    const subjects = subjectsPacket[0] as IdRow[];
 
     const studentIds = students.map((s) => s.id);
     const classIds = classes.map((c) => c.id);
+
+    const intel = await this.intelligenceEngine.getIntelligenceForSchool(schoolId, user, "cohorts-only");
+    const cohorts = intel.cohortSnapshots;
 
     const [
       studentAnalyticsList,
       classAnalyticsList,
       studentRisks,
-      gradeCohorts,
-      subjectCohorts,
       createdInterventions,
       resolvedInterventions,
       interventionsForLoad,
@@ -266,18 +281,9 @@ export class PrincipalReportsService {
       studentIds.length
         ? Promise.all(studentIds.map((id) => this.risk.getStudentRisk(schoolId, id, scoped)))
         : Promise.resolve([]),
-      this.cohortAnalytics.listGradeCohorts(schoolId, user),
-      this.cohortAnalytics.listSubjectCohorts(schoolId, user),
-      this.prisma.intervention.count({
-        where: { schoolId, createdAt: { gte: weekAgo } },
-      }),
-      this.prisma.intervention.count({
-        where: { schoolId, status: "resolved", updatedAt: { gte: weekAgo } },
-      }),
-      this.prisma.intervention.findMany({
-        where: { schoolId, createdAt: { gte: weekAgo } },
-        select: { teacherId: true },
-      }),
+      this.principalInterventionCreatedCount(schoolId, weekAgo),
+      this.principalInterventionResolvedCount(schoolId, weekAgo),
+      this.principalInterventionsForTeacherLoad(schoolId, weekAgo),
       this.lmsHeatmaps.getSchoolHeatmap(schoolId, scoped, formatYmd(heatmapFrom), formatYmd(now)),
       this.engagementTrendPercent(schoolId, studentIds, 7),
     ]);
@@ -299,11 +305,6 @@ export class PrincipalReportsService {
       studentRisks,
       engagementDeltaPct,
     );
-
-    const cohorts: CohortSummary[] = [
-      ...gradeCohorts.map((c) => mapCohortSummary(c, "grade")),
-      ...subjectCohorts.map((c) => mapCohortSummary(c, "subject")),
-    ];
 
     let low = 0;
     let medium = 0;

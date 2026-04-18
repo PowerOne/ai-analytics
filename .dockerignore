@@ -3,6 +3,7 @@ node_modules
 dist
 .git
 **/.env
+!apps/web/.env
 **/.env.*
 coverage
 .pytest_cache

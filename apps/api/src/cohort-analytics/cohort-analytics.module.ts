@@ -2,7 +2,6 @@ import { HttpModule } from "@nestjs/axios";
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { AnalyticsModule } from "../analytics/analytics.module";
-import { PrismaModule } from "../prisma/prisma.module";
 import { RiskModule } from "../risk/risk.module";
 import { CohortAnalyticsController } from "./cohort-analytics.controller";
 import { CohortAnalyticsService } from "./cohort-analytics.service";
@@ -10,7 +9,6 @@ import { CohortAnalyticsService } from "./cohort-analytics.service";
 @Module({
   imports: [
     ConfigModule,
-    PrismaModule,
     AnalyticsModule,
     RiskModule,
     HttpModule.register({

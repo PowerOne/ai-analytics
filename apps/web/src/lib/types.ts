@@ -1,11 +1,12 @@
 export type UserRole = "ADMIN" | "PRINCIPAL" | "TEACHER";
 
 export interface SessionUser {
+  id: string;
   email: string;
   role: UserRole;
   schoolId: string;
   token: string;
-  teacherId?: string;
+  teacherId?: string | null;
 }
 
 export interface ClassSummary {
@@ -46,9 +47,10 @@ export interface StudentAnalytics {
   ai: { riskScore: number | null; engagementScore: number | null; source: string };
 }
 
-export interface TrendPoint {
-  week: string;
-  score: number;
-  attendance: number;
-  engagement: number;
+/** Merged chart row for student score / attendance / engagement timelines */
+export interface StudentTrendChartRow {
+  name: string;
+  score: number | null;
+  attendancePct: number | null;
+  engagement: number | null;
 }

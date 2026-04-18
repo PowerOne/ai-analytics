@@ -6,16 +6,71 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { UserRole, type WeeklyClassSnapshot, type WeeklyStudentSnapshot } from "@prisma/client";
+import { UserRole } from "../common/user-role";
 import { AxiosError } from "axios";
+import type { RowDataPacket } from "mysql2/promise";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
 import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import type { JwtPayload } from "../common/types/jwt-payload";
-import { PrismaService } from "../prisma/prisma.service";
+import { MySQLService } from "../database/mysql.service";
 import { RiskService } from "../risk/risk.service";
 import type { StudentAttentionSummary } from "./dto/student-attention-summary.dto";
 import type { TeacherWeeklyReportResponse } from "./dto/teacher-weekly-report.dto";
+
+/** Snapshot fields used by weekly report deltas (DB-backed, camelCase). */
+type WeeklyClassSnapshotShape = {
+  performance: number | null;
+  attendance: number | null;
+  engagement: number | null;
+  riskScore: number | null;
+  riskComposite: number | null;
+  riskCategory: string | null;
+} | null;
+
+type WeeklyStudentSnapshotShape = {
+  performance: number | null;
+  attendance: number | null;
+  engagement: number | null;
+  riskScore: number | null;
+  riskComposite: number | null;
+  riskCategory: string | null;
+} | null;
+
+type ClassEnrollmentRow = RowDataPacket & {
+  classId: string;
+  name: string;
+  studentId: string;
+  student_pk: string;
+  displayName: string | null;
+  givenName: string | null;
+  familyName: string | null;
+};
+
+type TeacherClassWithEnrollments = {
+  id: string;
+  name: string;
+  enrollments: {
+    studentId: string;
+    student: {
+      id: string;
+      displayName: string | null;
+      givenName: string | null;
+      familyName: string | null;
+    };
+  }[];
+};
+
+type ClassListRow = RowDataPacket & { id: string; name: string };
+
+type ClassSnapDbRow = RowDataPacket & {
+  performance: number | null;
+  attendance: number | null;
+  engagement: number | null;
+  riskScore: number | null;
+  riskComposite: number | null;
+  riskCategory: string | null;
+};
 
 function asTeacherJwt(user: JwtPayload, schoolId: string, teacherId: string): JwtPayload {
   return {
@@ -56,23 +111,46 @@ function deltaCompositeRisk(a: number | null | undefined, b: number | null | und
   return Math.round((a - b) * 10) / 10;
 }
 
+function mapClassSnapRow(row: ClassSnapDbRow | undefined): WeeklyClassSnapshotShape {
+  if (!row) return null;
+  return {
+    performance: row.performance != null ? Number(row.performance) : null,
+    attendance: row.attendance != null ? Number(row.attendance) : null,
+    engagement: row.engagement != null ? Number(row.engagement) : null,
+    riskScore: row.riskScore != null ? Number(row.riskScore) : null,
+    riskComposite: row.riskComposite != null ? Number(row.riskComposite) : null,
+    riskCategory: row.riskCategory ?? null,
+  };
+}
+
+function mapStudentSnapRow(row: ClassSnapDbRow | undefined): WeeklyStudentSnapshotShape {
+  return mapClassSnapRow(row) as WeeklyStudentSnapshotShape;
+}
+
 @Injectable()
 export class WeeklyReportsService {
   private readonly logger = new Logger(WeeklyReportsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: MySQLService,
     private readonly analytics: AnalyticsService,
     private readonly risk: RiskService,
     private readonly http: HttpService,
     private readonly config: ConfigService,
   ) {}
 
-  private getSnapshotValue(row: any, field: string): number {
-    return row?.[field] ?? 0;
+  private getSnapshotValue(row: WeeklyClassSnapshotShape | WeeklyStudentSnapshotShape, field: string): number {
+    if (row == null) return 0;
+    const v = (row as Record<string, unknown>)[field];
+    if (v == null) return 0;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
   }
 
-  private computeStability(t: any, l: any): number {
+  private computeStability(
+    t: WeeklyStudentSnapshotShape,
+    l: WeeklyStudentSnapshotShape,
+  ): number {
     const perfDelta = this.getSnapshotValue(t, "performance") - this.getSnapshotValue(l, "performance");
     const attDelta = this.getSnapshotValue(t, "attendance") - this.getSnapshotValue(l, "attendance");
     const engDelta = this.getSnapshotValue(t, "engagement") - this.getSnapshotValue(l, "engagement");
@@ -91,8 +169,8 @@ export class WeeklyReportsService {
 
   /** Week-over-week delta from snapshot rows (same rounding as previous delta helpers). */
   private snapshotFieldDelta(
-    thisSnap: WeeklyClassSnapshot | WeeklyStudentSnapshot | null,
-    lastSnap: WeeklyClassSnapshot | WeeklyStudentSnapshot | null,
+    thisSnap: WeeklyClassSnapshotShape | WeeklyStudentSnapshotShape,
+    lastSnap: WeeklyClassSnapshotShape | WeeklyStudentSnapshotShape,
     field: "performance" | "attendance" | "engagement" | "riskScore",
   ): number {
     const hasThis = thisSnap != null;
@@ -133,32 +211,48 @@ export class WeeklyReportsService {
     classId: string,
     thisWeek: Date,
     lastWeek: Date,
-  ): Promise<{ thisWeek: WeeklyClassSnapshot | null; lastWeek: WeeklyClassSnapshot | null }> {
-    const [thisWeekSnap, lastWeekSnap] = await Promise.all([
-      this.prisma.weeklyClassSnapshot.findFirst({
-        where: { classId, weekStartDate: thisWeek },
-      }),
-      this.prisma.weeklyClassSnapshot.findFirst({
-        where: { classId, weekStartDate: lastWeek },
-      }),
+  ): Promise<{ thisWeek: WeeklyClassSnapshotShape; lastWeek: WeeklyClassSnapshotShape }> {
+    const sql = `
+      SELECT \`performance\`, \`attendance\`, \`engagement\`, \`riskScore\`,
+             \`riskComposite\`, \`riskCategory\`
+      FROM weekly_class_snapshots
+      WHERE \`classId\` = ? AND \`weekStartDate\` = ?
+      LIMIT 1
+    `;
+    const [thisPacket, lastPacket] = await Promise.all([
+      this.db.query(sql, [classId, thisWeek]),
+      this.db.query(sql, [classId, lastWeek]),
     ]);
-    return { thisWeek: thisWeekSnap, lastWeek: lastWeekSnap };
+    const thisRows = thisPacket[0] as ClassSnapDbRow[];
+    const lastRows = lastPacket[0] as ClassSnapDbRow[];
+    return {
+      thisWeek: mapClassSnapRow(thisRows[0]),
+      lastWeek: mapClassSnapRow(lastRows[0]),
+    };
   }
 
   private async loadStudentSnapshots(
     studentId: string,
     thisWeek: Date,
     lastWeek: Date,
-  ): Promise<{ thisWeek: WeeklyStudentSnapshot | null; lastWeek: WeeklyStudentSnapshot | null }> {
-    const [thisWeekSnap, lastWeekSnap] = await Promise.all([
-      this.prisma.weeklyStudentSnapshot.findFirst({
-        where: { studentId, weekStartDate: thisWeek },
-      }),
-      this.prisma.weeklyStudentSnapshot.findFirst({
-        where: { studentId, weekStartDate: lastWeek },
-      }),
+  ): Promise<{ thisWeek: WeeklyStudentSnapshotShape; lastWeek: WeeklyStudentSnapshotShape }> {
+    const sql = `
+      SELECT \`performance\`, \`attendance\`, \`engagement\`, \`riskScore\`,
+             \`riskComposite\`, \`riskCategory\`
+      FROM weekly_student_snapshots
+      WHERE \`studentId\` = ? AND \`weekStartDate\` = ?
+      LIMIT 1
+    `;
+    const [thisPacket, lastPacket] = await Promise.all([
+      this.db.query(sql, [studentId, thisWeek]),
+      this.db.query(sql, [studentId, lastWeek]),
     ]);
-    return { thisWeek: thisWeekSnap, lastWeek: lastWeekSnap };
+    const thisRows = thisPacket[0] as ClassSnapDbRow[];
+    const lastRows = lastPacket[0] as ClassSnapDbRow[];
+    return {
+      thisWeek: mapStudentSnapRow(thisRows[0]),
+      lastWeek: mapStudentSnapRow(lastRows[0]),
+    };
   }
 
   assertTeacherAccess(user: JwtPayload, teacherId: string): void {
@@ -187,13 +281,80 @@ export class WeeklyReportsService {
     }
   }
 
+  private async loadTeacherClassesWithEnrollments(
+    schoolId: string,
+    teacherId: string,
+  ): Promise<TeacherClassWithEnrollments[]> {
+    const classesSql = `
+      SELECT id, name FROM classes
+      WHERE school_id = ? AND primary_teacher_id = ? AND deleted_at IS NULL
+      ORDER BY name ASC
+    `;
+    const classPacket = (await this.db.query(classesSql, [schoolId, teacherId]))[0] as ClassListRow[];
+    const classRows = classPacket as ClassListRow[];
+    if (classRows.length === 0) return [];
+
+    const classIds = classRows.map((r) => String(r.id));
+    const placeholders = classIds.map(() => "?").join(", ");
+    const enSql = `
+      SELECT c.id AS classId,
+             c.name,
+             e.student_id AS studentId,
+             s.id AS student_pk,
+             s.display_name AS displayName,
+             s.given_name AS givenName,
+             s.family_name AS familyName
+      FROM enrollments e
+      INNER JOIN students s ON s.id = e.student_id AND s.deleted_at IS NULL
+      INNER JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
+      WHERE e.school_id = ?
+        AND e.deleted_at IS NULL
+        AND e.status = 'active'
+        AND c.primary_teacher_id = ?
+        AND e.class_id IN (${placeholders})
+      ORDER BY c.name ASC, e.student_id
+    `;
+    const enPacket = (await this.db.query(enSql, [
+      schoolId,
+      teacherId,
+      ...classIds,
+    ]))[0] as ClassEnrollmentRow[];
+    const enRows = enPacket as ClassEnrollmentRow[];
+
+    const byClass = new Map<string, TeacherClassWithEnrollments>();
+
+    for (const cr of classRows) {
+      const id = String(cr.id);
+      byClass.set(id, { id, name: String(cr.name), enrollments: [] });
+    }
+    for (const r of enRows) {
+      const entry = byClass.get(r.classId);
+      if (!entry) continue;
+      entry.enrollments.push({
+        studentId: r.studentId,
+        student: {
+          id: r.student_pk,
+          displayName: r.displayName,
+          givenName: r.givenName,
+          familyName: r.familyName,
+        },
+      });
+    }
+
+    return classIds.map((id) => byClass.get(id)!);
+  }
+
   async buildWeeklyReport(schoolId: string, teacherId: string, user: JwtPayload): Promise<TeacherWeeklyReportResponse> {
     this.assertTeacherAccess(user, teacherId);
 
-    const teacher = await this.prisma.teacher.findFirst({
-      where: { id: teacherId, schoolId, deletedAt: null },
-    });
-    if (!teacher) throw new NotFoundException("Teacher not found");
+    const teacherSql = `
+      SELECT id FROM teachers
+      WHERE id = ? AND school_id = ? AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    const tPacket = (await this.db.query(teacherSql, [teacherId, schoolId]))[0] as RowDataPacket[];
+    const tRows = tPacket as RowDataPacket[];
+    if (!tRows[0]) throw new NotFoundException("Teacher not found");
 
     const scoped = asTeacherJwt(user, schoolId, teacherId);
     const now = new Date();
@@ -201,16 +362,7 @@ export class WeeklyReportsService {
     const lastWeekMonday = new Date(thisWeekMonday);
     lastWeekMonday.setUTCDate(lastWeekMonday.getUTCDate() - 7);
 
-    const classes = await this.prisma.class.findMany({
-      where: { schoolId, primaryTeacherId: teacherId, deletedAt: null },
-      orderBy: { name: "asc" },
-      include: {
-        enrollments: {
-          where: { status: "active", deletedAt: null },
-          include: { student: { select: { id: true, displayName: true, givenName: true, familyName: true } } },
-        },
-      },
-    });
+    const classes = await this.loadTeacherClassesWithEnrollments(schoolId, teacherId);
 
     const studentIds = new Set<string>();
     for (const cls of classes) {
@@ -248,14 +400,18 @@ export class WeeklyReportsService {
         const engagementDelta = this.snapshotFieldDelta(t, l, "engagement");
         const riskDelta = this.snapshotFieldDelta(t, l, "riskScore");
 
-        const newInterventions = await this.prisma.intervention.count({
-          where: {
-            schoolId,
-            teacherId,
-            classId: cls.id,
-            createdAt: { gte: thisWeekMonday },
-          },
-        });
+        const countSql = `
+          SELECT COUNT(*) AS c FROM interventions
+          WHERE school_id = ? AND teacher_id = ? AND class_id = ? AND created_at >= ?
+        `;
+        const cntPacket = (await this.db.query(countSql, [
+          schoolId,
+          teacherId,
+          cls.id,
+          thisWeekMonday,
+        ]))[0] as RowDataPacket[];
+        const cntRows = cntPacket as RowDataPacket[];
+        const newInterventions = Number(cntRows[0]?.c ?? 0);
 
         return {
           classId: cls.id,
@@ -289,14 +445,18 @@ export class WeeklyReportsService {
         const engagementDelta = this.snapshotFieldDelta(st, lw, "engagement");
         const riskDelta = this.snapshotFieldDelta(st, lw, "riskScore");
 
-        const interventionsThisWeek = await this.prisma.intervention.count({
-          where: {
-            schoolId,
-            teacherId,
-            studentId: sid,
-            createdAt: { gte: thisWeekMonday },
-          },
-        });
+        const stuCountSql = `
+          SELECT COUNT(*) AS c FROM interventions
+          WHERE school_id = ? AND teacher_id = ? AND student_id = ? AND created_at >= ?
+        `;
+        const stuCntPacket = (await this.db.query(stuCountSql, [
+          schoolId,
+          teacherId,
+          sid,
+          thisWeekMonday,
+        ]))[0] as RowDataPacket[];
+        const stuCntRows = stuCntPacket as RowDataPacket[];
+        const interventionsThisWeek = Number(stuCntRows[0]?.c ?? 0);
 
         const performanceTier = this.classifyTier(this.getSnapshotValue(st, "performance"));
         const attendanceTier = this.classifyTier(this.getSnapshotValue(st, "attendance"));

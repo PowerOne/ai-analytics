@@ -78,12 +78,81 @@ export interface PrincipalCohortRow {
   interventions: number;
 }
 
+export interface PrincipalAttEngWindow {
+  from: string;
+  to: string;
+}
+
+export interface PrincipalAttEngDayBucket {
+  date: string;
+  attendanceRate?: number | null;
+  attendanceSessions: number;
+  engagementAvg?: number | null;
+  engagementEventCount: number;
+}
+
+export interface PrincipalAttEngWeekBucket {
+  weekStart: string;
+  attendanceRate?: number | null;
+  attendanceSessions: number;
+  engagementAvg?: number | null;
+  engagementEventCount: number;
+}
+
+export interface PrincipalAttEngSnapshotPoint {
+  weekStart: string;
+  attendance?: number | null;
+  engagement?: number | null;
+}
+
+export interface PrincipalAttEngSnapshot {
+  available: boolean;
+  message?: string | null;
+  points?: PrincipalAttEngSnapshotPoint[];
+}
+
+export interface PrincipalAttendanceEngagementHeatmapBlock {
+  window: PrincipalAttEngWindow;
+  daily: PrincipalAttEngDayBucket[];
+  weekly: PrincipalAttEngWeekBucket[];
+  snapshot: PrincipalAttEngSnapshot;
+}
+
+export interface PrincipalAttEngContributorStudent {
+  id: string;
+  displayName?: string | null;
+}
+
+export interface PrincipalAttEngContributorClass {
+  id: string;
+  name: string;
+}
+
+export interface PrincipalAttEngContributorsResponse {
+  metric: "attendance" | "engagement";
+  bucketType: "day" | "week";
+  bucketKey: string;
+  students: PrincipalAttEngContributorStudent[];
+  classes: PrincipalAttEngContributorClass[];
+}
+
+/** Arguments for `fetchPrincipalAttEngContributors` (token is not sent as a query param). */
+export type PrincipalAttEngContributorsParams = {
+  token: string;
+  bucketType: "day" | "week";
+  bucketKey: string;
+  metric: "attendance" | "engagement";
+  limit?: number;
+};
+
 export interface PrincipalDashboardResponse {
   schoolId: string;
   schoolTrends: SchoolTrendSummary;
   cohorts: PrincipalCohortRow[];
   interventions: { created: number; resolved: number; resolutionRate: number };
   heatmap: { daily: LmsHeatmapCell[]; weekly: LmsHeatmapCell[] };
+  /** Present on newer API builds; use optional chaining when reading. */
+  principalAttendanceEngagementHeatmap?: PrincipalAttendanceEngagementHeatmapBlock;
   aiSummary?: string | null;
   schoolInterventions: unknown[];
 }

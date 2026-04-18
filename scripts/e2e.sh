@@ -78,13 +78,7 @@ echo "[10/10] Testing API risk prediction..."
 curl -s "http://localhost:3001/api/students/123/risk" | jq .
 
 ###############################################
-# 7. VALIDATE PRISMA ENGINE
-###############################################
-echo "Checking Prisma engine inside API container..."
-docker exec aianalytics-api-1 ls /app/apps/api/node_modules/.prisma/client
-
-###############################################
-# 8. CHECK LOGS FOR ERRORS
+# 7. CHECK LOGS FOR ERRORS
 ###############################################
 echo "Checking API logs..."
 docker logs aianalytics-api-1 --tail=200
@@ -93,7 +87,7 @@ echo "Checking AI logs..."
 docker logs aianalytics-ai-1 --tail=200
 
 ###############################################
-# 9. FINAL RESULT
+# 8. FINAL RESULT
 ###############################################
 echo "=== E2E TEST COMPLETE ==="
 echo "If no errors were printed, the system is healthy."

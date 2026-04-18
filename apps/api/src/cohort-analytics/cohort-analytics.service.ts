@@ -1,17 +1,40 @@
 import { HttpService } from "@nestjs/axios";
 import { Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { UserRole } from "@prisma/client";
 import { AxiosError } from "axios";
+import type { RowDataPacket } from "mysql2/promise";
 import { firstValueFrom } from "rxjs";
 import { AnalyticsService } from "../analytics/analytics.service";
 import { aiHttpHeaders } from "../integrations/ai-request-headers";
 import type { TrendPoint } from "../analytics/dto/common.dto";
+import { UserRole } from "../common/user-role";
 import type { JwtPayload } from "../common/types/jwt-payload";
-import { PrismaService } from "../prisma/prisma.service";
+import { MySQLService } from "../database/mysql.service";
 import { RiskService } from "../risk/risk.service";
 import { RiskLevel } from "../risk/dto/risk-level.enum";
 import type { CohortSummaryResponse } from "./dto/cohort-summary.dto";
+
+type AvgEngRow = RowDataPacket & { avgEng: number | null };
+
+type CountRow = RowDataPacket & { c: number };
+
+type StudentGradeRow = RowDataPacket & { id: string; gradeLevel: string | null };
+
+type SubjectRow = RowDataPacket & { id: string; name: string; code: string };
+
+type ClassEnrollmentFlatRow = RowDataPacket & {
+  classId: string;
+  subjectId: string;
+  studentId: string | null;
+  gradeLevel: string | null;
+};
+
+/** Shape produced by `loadClassesWithEnrollments`. */
+type LoadedClassWithEnrollments = {
+  id: string;
+  subjectId: string;
+  enrollments: { studentId: string; student: { gradeLevel: string | null } }[];
+};
 
 function toPrincipalScope(user: JwtPayload, schoolId: string): JwtPayload {
   return {
@@ -91,7 +114,7 @@ export class CohortAnalyticsService {
   private readonly logger = new Logger(CohortAnalyticsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: MySQLService,
     private readonly analytics: AnalyticsService,
     private readonly risk: RiskService,
     private readonly http: HttpService,
@@ -131,30 +154,66 @@ export class CohortAnalyticsService {
     const now = new Date();
     const lastStart = subDays(now, windowDays);
     const prevStart = subDays(now, windowDays * 2);
-    const [lastAgg, prevAgg] = await Promise.all([
-      this.prisma.lmsActivityEvent.aggregate({
-        where: {
-          schoolId,
-          studentId: { in: studentIds },
-          deletedAt: null,
-          occurredAt: { gte: lastStart },
-        },
-        _avg: { engagementScore: true },
-      }),
-      this.prisma.lmsActivityEvent.aggregate({
-        where: {
-          schoolId,
-          studentId: { in: studentIds },
-          deletedAt: null,
-          occurredAt: { gte: prevStart, lt: lastStart },
-        },
-        _avg: { engagementScore: true },
-      }),
+    const placeholders = studentIds.map(() => "?").join(", ");
+    const baseParams = [schoolId, ...studentIds];
+    const lastSql = `
+      SELECT AVG(engagement_score) AS avgEng
+      FROM lms_activity_events
+      WHERE school_id = ?
+        AND student_id IN (${placeholders})
+        AND deleted_at IS NULL
+        AND occurred_at >= ?
+    `;
+    const prevSql = `
+      SELECT AVG(engagement_score) AS avgEng
+      FROM lms_activity_events
+      WHERE school_id = ?
+        AND student_id IN (${placeholders})
+        AND deleted_at IS NULL
+        AND occurred_at >= ?
+        AND occurred_at < ?
+    `;
+    const [lastTuple, prevTuple] = await Promise.all([
+      this.db.query(lastSql, [...baseParams, lastStart]),
+      this.db.query(prevSql, [...baseParams, prevStart, lastStart]),
     ]);
-    const last = lastAgg._avg.engagementScore ? Number(lastAgg._avg.engagementScore) : 0;
-    const prev = prevAgg._avg.engagementScore ? Number(prevAgg._avg.engagementScore) : 0;
+    const lastRows = lastTuple[0] as AvgEngRow[];
+    const prevRows = prevTuple[0] as AvgEngRow[];
+    const last = lastRows[0]?.avgEng != null ? Number(lastRows[0].avgEng) : 0;
+    const prev = prevRows[0]?.avgEng != null ? Number(prevRows[0].avgEng) : 0;
     if (Math.abs(prev) < 1e-9) return 0;
     return Math.round(((last - prev) / prev) * 1000) / 10;
+  }
+
+  private async countInterventionsForCohort(
+    schoolId: string,
+    classIds: string[],
+    studentIds: string[],
+  ): Promise<number> {
+    if (classIds.length && studentIds.length) {
+      const cp = classIds.map(() => "?").join(", ");
+      const sp = studentIds.map(() => "?").join(", ");
+      const sql = `
+        SELECT COUNT(*) AS c FROM interventions
+        WHERE school_id = ?
+          AND (class_id IN (${cp}) OR student_id IN (${sp}))
+      `;
+      const packet = (await this.db.query(sql, [schoolId, ...classIds, ...studentIds]))[0] as CountRow[];
+      return Number((packet as CountRow[])[0]?.c ?? 0);
+    }
+    if (classIds.length) {
+      const cp = classIds.map(() => "?").join(", ");
+      const sql = `SELECT COUNT(*) AS c FROM interventions WHERE school_id = ? AND class_id IN (${cp})`;
+      const packet = (await this.db.query(sql, [schoolId, ...classIds]))[0] as CountRow[];
+      return Number((packet as CountRow[])[0]?.c ?? 0);
+    }
+    if (studentIds.length) {
+      const sp = studentIds.map(() => "?").join(", ");
+      const sql = `SELECT COUNT(*) AS c FROM interventions WHERE school_id = ? AND student_id IN (${sp})`;
+      const packet = (await this.db.query(sql, [schoolId, ...studentIds]))[0] as CountRow[];
+      return Number((packet as CountRow[])[0]?.c ?? 0);
+    }
+    return 0;
   }
 
   async buildCohortSummary(
@@ -233,23 +292,7 @@ export class CohortAnalyticsService {
           ) / 10
         : 0;
 
-    let interventions = 0;
-    if (classIds.length && studentIds.length) {
-      interventions = await this.prisma.intervention.count({
-        where: {
-          schoolId,
-          OR: [{ classId: { in: classIds } }, { studentId: { in: studentIds } }],
-        },
-      });
-    } else if (classIds.length) {
-      interventions = await this.prisma.intervention.count({
-        where: { schoolId, classId: { in: classIds } },
-      });
-    } else if (studentIds.length) {
-      interventions = await this.prisma.intervention.count({
-        where: { schoolId, studentId: { in: studentIds } },
-      });
-    }
+    const interventions = await this.countInterventionsForCohort(schoolId, classIds, studentIds);
 
     const scorePoints = mergeTrendPoints([
       ...studentAnalyticsList.flatMap((a) => a.scoreTimeline ?? []),
@@ -313,10 +356,7 @@ export class CohortAnalyticsService {
 
   async listGradeCohorts(schoolId: string, user: JwtPayload) {
     const scoped = toPrincipalScope(user, schoolId);
-    const students = await this.prisma.student.findMany({
-      where: { schoolId, deletedAt: null },
-      select: { id: true, gradeLevel: true },
-    });
+    const students = await this.fetchStudentsWithGrade(schoolId);
     const keys = new Set(students.map((s) => normalizeGradeKey(s.gradeLevel)));
     const classes = await this.loadClassesWithEnrollments(schoolId);
     const byGrade = this.mapClassesByGrade(classes);
@@ -335,10 +375,7 @@ export class CohortAnalyticsService {
   async getGradeCohort(schoolId: string, gradeId: string, user: JwtPayload) {
     const scoped = toPrincipalScope(user, schoolId);
     const key = decodeURIComponent(gradeId);
-    const students = await this.prisma.student.findMany({
-      where: { schoolId, deletedAt: null },
-      select: { id: true, gradeLevel: true },
-    });
+    const students = await this.fetchStudentsWithGrade(schoolId);
     const studentIds = students.filter((s) => normalizeGradeKey(s.gradeLevel) === key).map((s) => s.id);
     const classes = await this.loadClassesWithEnrollments(schoolId);
     const classIds = this.mapClassesByGrade(classes).get(key) ?? [];
@@ -355,10 +392,7 @@ export class CohortAnalyticsService {
 
   async listSubjectCohorts(schoolId: string, user: JwtPayload) {
     const scoped = toPrincipalScope(user, schoolId);
-    const subjects = await this.prisma.subject.findMany({
-      where: { schoolId, deletedAt: null },
-      select: { id: true, name: true, code: true },
-    });
+    const subjects = await this.fetchSubjectsForSchool(schoolId);
     const classes = await this.loadClassesWithEnrollments(schoolId);
     const bySubject = this.mapClassesBySubject(classes);
     const out: CohortSummaryResponse[] = [];
@@ -383,9 +417,7 @@ export class CohortAnalyticsService {
 
   async getSubjectCohort(schoolId: string, subjectId: string, user: JwtPayload) {
     const scoped = toPrincipalScope(user, schoolId);
-    const sub = await this.prisma.subject.findFirst({
-      where: { id: subjectId, schoolId, deletedAt: null },
-    });
+    const sub = await this.fetchSubjectById(schoolId, subjectId);
     if (!sub) {
       return null;
     }
@@ -404,19 +436,75 @@ export class CohortAnalyticsService {
     );
   }
 
-  private async loadClassesWithEnrollments(schoolId: string) {
-    return this.prisma.class.findMany({
-      where: { schoolId, deletedAt: null },
-      include: {
-        subject: { select: { id: true, name: true, code: true } },
-        enrollments: {
-          where: { status: "active", deletedAt: null },
-          include: {
-            student: { select: { id: true, gradeLevel: true } },
-          },
-        },
-      },
-    });
+  private async fetchStudentsWithGrade(schoolId: string): Promise<{ id: string; gradeLevel: string | null }[]> {
+    const sql = `
+      SELECT id, grade_level AS gradeLevel
+      FROM students
+      WHERE school_id = ? AND deleted_at IS NULL
+    `;
+    const packet = (await this.db.query(sql, [schoolId]))[0] as StudentGradeRow[];
+    return packet as StudentGradeRow[];
+  }
+
+  private async fetchSubjectsForSchool(schoolId: string): Promise<{ id: string; name: string; code: string }[]> {
+    const sql = `
+      SELECT id, name, code FROM subjects
+      WHERE school_id = ? AND deleted_at IS NULL
+    `;
+    const packet = (await this.db.query(sql, [schoolId]))[0] as SubjectRow[];
+    return packet as SubjectRow[];
+  }
+
+  private async fetchSubjectById(
+    schoolId: string,
+    subjectId: string,
+  ): Promise<{ id: string; name: string; code: string } | null> {
+    const sql = `
+      SELECT id, name, code FROM subjects
+      WHERE id = ? AND school_id = ? AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    const packet = (await this.db.query(sql, [subjectId, schoolId]))[0] as SubjectRow[];
+    const rows = packet as SubjectRow[];
+    return rows[0] ?? null;
+  }
+
+  private async loadClassesWithEnrollments(schoolId: string): Promise<LoadedClassWithEnrollments[]> {
+    const sql = `
+      SELECT c.id AS classId,
+             c.subject_id AS subjectId,
+             e.student_id AS studentId,
+             st.grade_level AS gradeLevel
+      FROM classes c
+      LEFT JOIN enrollments e
+        ON e.class_id = c.id
+        AND e.school_id = c.school_id
+        AND e.deleted_at IS NULL
+        AND e.status = 'active'
+      LEFT JOIN students st ON st.id = e.student_id AND st.deleted_at IS NULL
+      WHERE c.school_id = ? AND c.deleted_at IS NULL
+      ORDER BY c.id, e.student_id
+    `;
+    const packet = (await this.db.query(sql, [schoolId]))[0] as ClassEnrollmentFlatRow[];
+    const rows = packet as ClassEnrollmentFlatRow[];
+    const byClass = new Map<string, LoadedClassWithEnrollments>();
+    for (const r of rows) {
+      let cls = byClass.get(r.classId);
+      if (!cls) {
+        cls = { id: r.classId, subjectId: r.subjectId, enrollments: [] };
+        byClass.set(r.classId, cls);
+      }
+      if (r.studentId) {
+        const dup = cls.enrollments.some((e) => e.studentId === r.studentId);
+        if (!dup) {
+          cls.enrollments.push({
+            studentId: r.studentId,
+            student: { gradeLevel: r.gradeLevel },
+          });
+        }
+      }
+    }
+    return [...byClass.values()];
   }
 
   private mapClassesByGrade(

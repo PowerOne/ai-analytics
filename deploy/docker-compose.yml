@@ -1,19 +1,23 @@
 services:
-  postgres:
-    image: postgres:16-alpine
+  mysql:
+    image: mysql:8
     environment:
-      POSTGRES_USER: analytics
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-analytics}
-      POSTGRES_DB: learning_analytics
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-analytics}
+      MYSQL_DATABASE: learning_analytics
     ports:
-      - "5432:5432"
+      - "3306:3306"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mysqldata:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U analytics -d learning_analytics"]
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" || exit 1",
+        ]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     networks:
       - la-internal
 
@@ -22,7 +26,7 @@ services:
       context: ..
       dockerfile: services/ai/Dockerfile
     environment:
-      DATABASE_URL: postgresql://analytics:${POSTGRES_PASSWORD:-analytics}@postgres:5432/learning_analytics
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-analytics}@mysql:3306/learning_analytics
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-}
       MODEL_DIR: /app/artifacts
     ports:
@@ -30,8 +34,19 @@ services:
     volumes:
       - ai-artifacts:/app/artifacts
     depends_on:
-      postgres:
+      mysql:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     networks:
       - la-internal
     restart: unless-stopped
@@ -43,7 +58,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
-      DATABASE_URL: postgresql://analytics:${POSTGRES_PASSWORD:-analytics}@postgres:5432/learning_analytics
+      DATABASE_URL: mysql://root:${MYSQL_ROOT_PASSWORD:-analytics}@mysql:3306/learning_analytics
       JWT_SECRET: ${JWT_SECRET:-dev-change-me-use-openssl-rand}
       JWT_EXPIRES_DAYS: ${JWT_EXPIRES_DAYS:-7}
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
@@ -52,7 +67,7 @@ services:
     ports:
       - "3001:3001"
     depends_on:
-      postgres:
+      mysql:
         condition: service_healthy
       ai:
         condition: service_healthy
@@ -66,9 +81,12 @@ services:
       dockerfile: apps/lap/Dockerfile.prod
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001/api}
+        NEXT_PUBLIC_USE_MOCK: "false"
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001/api}
+      NEXT_PUBLIC_USE_MOCK: "false"
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:3001/api}
     ports:
       - "3000:3000"
     depends_on:
@@ -79,7 +97,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  pgdata:
+  mysqldata:
   ai-artifacts:
 
 networks:

@@ -11,19 +11,19 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { StudentAnalytics, TrendPoint } from "@/lib/types";
+import type { StudentAnalytics, StudentTrendChartRow } from "@/lib/types";
 
 export function StudentDetailTabs({
   analytics,
   trends,
 }: {
   analytics: StudentAnalytics;
-  trends: TrendPoint[];
+  trends: StudentTrendChartRow[];
 }) {
   const chartData = trends.map((t) => ({
-    name: t.week,
+    name: t.name,
     score: t.score,
-    attendancePct: Math.round(t.attendance * 100),
+    attendancePct: t.attendancePct,
     engagement: t.engagement,
   }));
 
@@ -57,7 +57,7 @@ export function StudentDetailTabs({
             </div>
           </dl>
           <p className="mt-4 text-xs text-slate-500">
-            AI risk placeholder:{" "}
+            AI risk:{" "}
             <span className="text-slate-400">
               {analytics.ai.riskScore ?? "—"} ({analytics.ai.source})
             </span>
@@ -99,41 +99,46 @@ export function StudentDetailTabs({
             </div>
           </dl>
           <p className="mt-4 text-xs text-slate-500">
-            AI engagement placeholder: {analytics.ai.engagementScore ?? "—"}
+            AI engagement: {analytics.ai.engagementScore ?? "—"}
           </p>
         </TabPanel>
         <TabPanel className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
           <p className="mb-4 text-xs text-slate-500">
-            Weekly trends (mock / API TBD) — scores, attendance %, engagement index
+            Daily score %, attendance %, and school-wide engagement index (flat line when a single aggregate is
+            returned).
           </p>
-          <div className="h-72 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis dataKey="name" stroke="#64748b" fontSize={12} />
-                <YAxis stroke="#64748b" fontSize={12} />
-                <Tooltip
-                  contentStyle={{ background: "#1e293b", border: "1px solid #334155" }}
-                />
-                <Legend />
-                <Line type="monotone" dataKey="score" name="Avg score" stroke="#38bdf8" dot={false} />
-                <Line
-                  type="monotone"
-                  dataKey="attendancePct"
-                  name="Attendance %"
-                  stroke="#4ade80"
-                  dot={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="engagement"
-                  name="Engagement"
-                  stroke="#fbbf24"
-                  dot={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+          {chartData.length === 0 ? (
+            <p className="text-sm text-slate-500">No timeline data for this student yet.</p>
+          ) : (
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="name" stroke="#64748b" fontSize={12} />
+                  <YAxis stroke="#64748b" fontSize={12} />
+                  <Tooltip
+                    contentStyle={{ background: "#1e293b", border: "1px solid #334155" }}
+                  />
+                  <Legend />
+                  <Line type="monotone" dataKey="score" name="Avg score %" stroke="#38bdf8" dot={false} />
+                  <Line
+                    type="monotone"
+                    dataKey="attendancePct"
+                    name="Attendance %"
+                    stroke="#4ade80"
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="engagement"
+                    name="Engagement index"
+                    stroke="#fbbf24"
+                    dot={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </TabPanel>
       </TabPanels>
     </TabGroup>

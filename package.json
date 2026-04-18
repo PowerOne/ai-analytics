@@ -22,11 +22,6 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "prisma": "5.22.0",
     "ts-node": "^10.9.2"
-  },
-  "prisma": {
-    "seed": "ts-node apps/api/prisma/seed.js",
-    "schema": "apps/api/prisma/schema.prisma"
   }
 }

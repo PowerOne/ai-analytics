@@ -1,19 +1,42 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import * as bcrypt from "bcryptjs";
-import { PrismaService } from "../prisma/prisma.service";
+import type { RowDataPacket } from "mysql2/promise";
+import { MySQLService } from "../database/mysql.service";
 import type { JwtPayload } from "../common/types/jwt-payload";
+import type { UserRole } from "../common/user-role";
 import type { LoginDto } from "./dto/login.dto";
+
+type UserAuthRow = RowDataPacket & {
+  id: string;
+  email: string;
+  passwordHash: string;
+  schoolId: string;
+  role: UserRole;
+  teacherId: string | null;
+};
 
 @Injectable()
 export class AuthService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: MySQLService,
     private readonly jwt: JwtService,
   ) {}
 
   async validateUser(email: string, password: string) {
-    const user = await this.prisma.user.findUnique({ where: { email } });
+    const sql = `
+      SELECT id,
+             email,
+             password_hash AS passwordHash,
+             school_id AS schoolId,
+             role,
+             teacher_id AS teacherId
+      FROM users
+      WHERE email = ?
+      LIMIT 1
+    `;
+    const rows = (await this.db.query(sql, [email]))[0] as UserAuthRow[];
+    const user = rows[0];
     if (!user) return null;
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return null;

@@ -4,15 +4,27 @@ import {
   Logger,
   NotFoundException,
 } from "@nestjs/common";
-import { UserRole } from "@prisma/client";
+import { UserRole } from "../common/user-role";
+import type { RowDataPacket } from "mysql2/promise";
 import { AnalyticsService } from "../analytics/analytics.service";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import { InsightsService } from "../insights/insights.service";
-import { PrismaService } from "../prisma/prisma.service";
+import { MySQLService } from "../database/mysql.service";
 import { RiskService } from "../risk/risk.service";
 import type { ClassSummaryResponse } from "./dto/class-summary.dto";
 import type { StudentSummaryResponse } from "./dto/student-summary.dto";
 import type { TeacherDashboardResponse } from "./dto/teacher-dashboard.dto";
+
+type TeacherRow = RowDataPacket & { id: string };
+type ClassBasicRow = RowDataPacket & { id: string; name: string };
+type EnrollmentStudentRow = RowDataPacket & {
+  classId: string;
+  studentId: string;
+  student_pk: string;
+  displayName: string | null;
+  givenName: string | null;
+  familyName: string | null;
+};
 
 function studentDisplayName(s: {
   id: string;
@@ -28,7 +40,7 @@ export class TeacherAnalyticsService {
   private readonly logger = new Logger(TeacherAnalyticsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: MySQLService,
     private readonly analytics: AnalyticsService,
     private readonly risk: RiskService,
     private readonly insights: InsightsService,
@@ -41,9 +53,13 @@ export class TeacherAnalyticsService {
   }
 
   private async ensureTeacherInSchool(teacherId: string, schoolId: string) {
-    const teacher = await this.prisma.teacher.findFirst({
-      where: { id: teacherId, schoolId, deletedAt: null },
-    });
+    const sql = `
+      SELECT id FROM teachers
+      WHERE id = ? AND school_id = ? AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    const rows = (await this.db.query(sql, [teacherId, schoolId]))[0] as TeacherRow[];
+    const teacher = rows[0];
     if (!teacher) throw new NotFoundException("Teacher not found");
     return teacher;
   }
@@ -127,33 +143,78 @@ export class TeacherAnalyticsService {
     };
   }
 
+  private async fetchEnrollmentsForTeacherClasses(
+    schoolId: string,
+    teacherId: string,
+    classId?: string,
+  ): Promise<EnrollmentStudentRow[]> {
+    const params: unknown[] = [schoolId, schoolId, teacherId];
+    let classFilter = "";
+    if (classId !== undefined) {
+      classFilter = " AND e.class_id = ?";
+      params.push(classId);
+    }
+    const sql = `
+      SELECT e.class_id AS classId,
+             e.student_id AS studentId,
+             s.id AS student_pk,
+             s.display_name AS displayName,
+             s.given_name AS givenName,
+             s.family_name AS familyName
+      FROM enrollments e
+      INNER JOIN students s ON s.id = e.student_id AND s.deleted_at IS NULL
+      INNER JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
+      WHERE e.school_id = ?
+        AND e.deleted_at IS NULL
+        AND e.status = 'active'
+        AND c.school_id = ?
+        AND c.primary_teacher_id = ?
+        ${classFilter}
+    `;
+    const rows = (await this.db.query(sql, params))[0] as EnrollmentStudentRow[];
+    return rows;
+  }
+
+  private mapEnrollmentsByClassId(rows: EnrollmentStudentRow[]) {
+    const map = new Map<
+      string,
+      { studentId: string; student: { id: string; displayName: string | null; givenName: string | null; familyName: string | null } }[]
+    >();
+    for (const r of rows) {
+      const list = map.get(r.classId) ?? [];
+      list.push({
+        studentId: r.studentId,
+        student: {
+          id: r.student_pk,
+          displayName: r.displayName,
+          givenName: r.givenName,
+          familyName: r.familyName,
+        },
+      });
+      map.set(r.classId, list);
+    }
+    return map;
+  }
+
   async getTeacherDashboard(teacherId: string, schoolId: string, user: JwtPayload): Promise<TeacherDashboardResponse> {
     this.assertTeacherRoleAccess(teacherId, user);
     await this.ensureTeacherInSchool(teacherId, schoolId);
 
-    const classes = await this.prisma.class.findMany({
-      where: {
-        schoolId,
-        primaryTeacherId: teacherId,
-        deletedAt: null,
-      },
-      orderBy: { name: "asc" },
-      include: {
-        enrollments: {
-          where: { deletedAt: null, status: "active" },
-          include: {
-            student: {
-              select: {
-                id: true,
-                displayName: true,
-                givenName: true,
-                familyName: true,
-              },
-            },
-          },
-        },
-      },
-    });
+    const classesSql = `
+      SELECT id, name FROM classes
+      WHERE school_id = ? AND primary_teacher_id = ? AND deleted_at IS NULL
+      ORDER BY name ASC
+    `;
+    const classRows = (await this.db.query(classesSql, [schoolId, teacherId]))[0] as ClassBasicRow[];
+
+    const enrollmentFlat = await this.fetchEnrollmentsForTeacherClasses(schoolId, teacherId);
+    const enrollmentsByClass = this.mapEnrollmentsByClassId(enrollmentFlat);
+
+    const classes = classRows.map((c) => ({
+      id: c.id,
+      name: c.name,
+      enrollments: enrollmentsByClass.get(c.id) ?? [],
+    }));
 
     const summaries = await Promise.all(
       classes.map((c) =>
@@ -173,33 +234,28 @@ export class TeacherAnalyticsService {
     this.assertTeacherRoleAccess(teacherId, user);
     await this.ensureTeacherInSchool(teacherId, schoolId);
 
-    const cls = await this.prisma.class.findFirst({
-      where: {
-        id: classId,
-        schoolId,
-        primaryTeacherId: teacherId,
-        deletedAt: null,
-      },
-      include: {
-        enrollments: {
-          where: { deletedAt: null, status: "active" },
-          include: {
-            student: {
-              select: {
-                id: true,
-                displayName: true,
-                givenName: true,
-                familyName: true,
-              },
-            },
-          },
-        },
-      },
-    });
+    const clsSql = `
+      SELECT id, name FROM classes
+      WHERE id = ? AND school_id = ? AND primary_teacher_id = ? AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    const classRows = (await this.db.query(clsSql, [classId, schoolId, teacherId]))[0] as ClassBasicRow[];
+    const cls = classRows[0];
 
     if (!cls) throw new NotFoundException("Class not found for this teacher");
 
-    return this.buildClassSummary(schoolId, cls.id, cls.name, user, cls.enrollments);
+    const enrollmentFlat = await this.fetchEnrollmentsForTeacherClasses(schoolId, teacherId, classId);
+    const enrollments = enrollmentFlat.map((r) => ({
+      studentId: r.studentId,
+      student: {
+        id: r.student_pk,
+        displayName: r.displayName,
+        givenName: r.givenName,
+        familyName: r.familyName,
+      },
+    }));
+
+    return this.buildClassSummary(schoolId, cls.id, cls.name, user, enrollments);
   }
 
   async getTeacherStudentDashboard(
@@ -211,38 +267,45 @@ export class TeacherAnalyticsService {
     this.assertTeacherRoleAccess(teacherId, user);
     await this.ensureTeacherInSchool(teacherId, schoolId);
 
-    const enrollment = await this.prisma.enrollment.findFirst({
-      where: {
-        studentId,
-        schoolId,
-        deletedAt: null,
-        status: "active",
-        class: {
-          primaryTeacherId: teacherId,
-          schoolId,
-          deletedAt: null,
-        },
-      },
-      include: {
-        student: {
-          select: {
-            id: true,
-            displayName: true,
-            givenName: true,
-            familyName: true,
-          },
-        },
-      },
-    });
+    const sql = `
+      SELECT e.student_id AS studentId,
+             s.id AS student_pk,
+             s.display_name AS displayName,
+             s.given_name AS givenName,
+             s.family_name AS familyName
+      FROM enrollments e
+      INNER JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
+      INNER JOIN students s ON s.id = e.student_id AND s.deleted_at IS NULL
+      WHERE e.student_id = ?
+        AND e.school_id = ?
+        AND e.deleted_at IS NULL
+        AND e.status = 'active'
+        AND c.school_id = ?
+        AND c.primary_teacher_id = ?
+        AND c.deleted_at IS NULL
+      LIMIT 1
+    `;
+    const rows = (await this.db.query(sql, [
+      studentId,
+      schoolId,
+      schoolId,
+      teacherId,
+    ]))[0] as EnrollmentStudentRow[];
+    const row = rows[0];
 
-    if (!enrollment) {
+    if (!row) {
       throw new NotFoundException("Student not found in this teacher's classes");
     }
 
     return this.buildStudentSummary(
       schoolId,
-      enrollment.studentId,
-      studentDisplayName(enrollment.student),
+      row.studentId,
+      studentDisplayName({
+        id: row.student_pk,
+        displayName: row.displayName,
+        givenName: row.givenName,
+        familyName: row.familyName,
+      }),
       user,
     );
   }

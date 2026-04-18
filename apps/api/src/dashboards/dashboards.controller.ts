@@ -1,6 +1,6 @@
-import { Controller, Get, Param, UseGuards } from "@nestjs/common";
+import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
-import { UserRole } from "@prisma/client";
+import { UserRole } from "../common/user-role";
 import { Roles } from "../auth/decorators/roles.decorator";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import { RolesGuard } from "../auth/guards/roles.guard";
@@ -11,6 +11,8 @@ import { DashboardsService } from "./dashboards.service";
 import { Class360DashboardResponse } from "./dto/class360-dashboard.dto";
 import { CohortDashboardResponse } from "./dto/cohort-dashboard.dto";
 import { PrincipalDashboardResponse } from "./dto/principal-dashboard.dto";
+import { PrincipalAttEngContributorsResponseDto } from "./dto/principal-attendance-engagement-heatmap.dto";
+import { PrincipalAttEngContributorsQueryDto } from "./dto/principal-att-eng-contributors-query.dto";
 import { Student360DashboardResponse } from "./dto/student360-dashboard.dto";
 import { TeacherDashboardResponse } from "./dto/teacher-dashboard.dto";
 
@@ -30,6 +32,21 @@ export class DashboardsController {
     @CurrentUser() user: JwtPayload,
   ) {
     return this.dashboards.getTeacherDashboard(schoolId, teacherId, user);
+  }
+
+  @Get("dashboards/principal/attendance-engagement/contributors")
+  @Roles(UserRole.ADMIN, UserRole.PRINCIPAL)
+  @ApiOperation({
+    summary:
+      "Principal: students and classes contributing to an attendance or engagement heatmap bucket (drill-down)",
+  })
+  @ApiOkResponse({ type: PrincipalAttEngContributorsResponseDto })
+  getPrincipalAttEngContributors(
+    @Param("schoolId") schoolId: string,
+    @Query() query: PrincipalAttEngContributorsQueryDto,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.dashboards.getPrincipalAttEngContributors(schoolId, user, query);
   }
 
   @Get("dashboards/principal")

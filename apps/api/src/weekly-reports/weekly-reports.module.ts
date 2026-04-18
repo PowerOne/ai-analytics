@@ -3,7 +3,6 @@ import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { AnalyticsModule } from "../analytics/analytics.module";
 import { LmsHeatmapsModule } from "../lms-heatmaps/lms-heatmaps.module";
-import { PrismaModule } from "../prisma/prisma.module";
 import { RiskModule } from "../risk/risk.module";
 import { WeeklyReportsController } from "./weekly-reports.controller";
 import { WeeklyReportsService } from "./weekly-reports.service";
@@ -11,7 +10,6 @@ import { WeeklyReportsService } from "./weekly-reports.service";
 @Module({
   imports: [
     ConfigModule,
-    PrismaModule,
     AnalyticsModule,
     RiskModule,
     LmsHeatmapsModule,

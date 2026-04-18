@@ -3,6 +3,7 @@
 import { CohortSummaryTable } from "@/components/CohortSummaryTable";
 import { DashboardCard } from "@/components/DashboardCard";
 import { Heatmap } from "@/components/Heatmap";
+import { PrincipalAttendanceEngagementHeatmap } from "@/components/principal/PrincipalAttendanceEngagementHeatmap";
 import { TrendDelta } from "@/components/TrendDelta";
 import { useAuth } from "@/context/auth-context";
 import { getPrincipalDashboard } from "@/lib/api";
@@ -24,7 +25,7 @@ export default function PrincipalDashboardPage() {
     (async () => {
       try {
         setLoading(true);
-        const res = await getPrincipalDashboard(user.schoolId, user.token);
+        const res = await getPrincipalDashboard(user);
         if (!cancelled) {
           setData(res);
           setError(null);
@@ -91,6 +92,15 @@ export default function PrincipalDashboardPage() {
       </section>
 
       <Heatmap daily={data.heatmap.daily} weekly={data.heatmap.weekly} />
+
+      {data.principalAttendanceEngagementHeatmap != null ? (
+        <section>
+          <h2 className="mb-3 text-lg font-semibold text-slate-200">Attendance &amp; Engagement</h2>
+          <PrincipalAttendanceEngagementHeatmap
+            principalAttendanceEngagementHeatmap={data.principalAttendanceEngagementHeatmap}
+          />
+        </section>
+      ) : null}
 
       {data.aiSummary && (
         <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-4">

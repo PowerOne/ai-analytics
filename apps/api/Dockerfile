@@ -1,40 +1,47 @@
-FROM node:20-bullseye AS builder
+# Correct Dockerfile for @learning-analytics/api (NestJS)
+FROM node:20-alpine AS builder
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 WORKDIR /app
 
-# 1. Copy root workspace files
+# Copy workspace metadata
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY tsconfig.base.json ./
 
-# 2. Copy ALL workspace code BEFORE install
-COPY packages ./packages
-COPY apps ./apps
+# Copy package.json files for dependency graph resolution
+COPY packages/shared/package.json packages/shared/
+COPY apps/api/package.json apps/api/
 
-# 3. Install dependencies
+# Copy actual source code
+COPY packages/shared packages/shared
+COPY apps/api apps/api
+
+# Install all workspace dependencies
 RUN pnpm install --frozen-lockfile
 
-# 4. Generate Prisma client (prisma CLI is a devDependency of @learning-analytics/api, not the root)
-RUN pnpm --filter @learning-analytics/api run prisma:generate
+# Build shared first
+RUN pnpm --filter @learning-analytics/shared build
 
-# 5. Build shared + API
-RUN pnpm --filter @learning-analytics/shared run build
-RUN pnpm --filter @learning-analytics/api run build
+# Build API
+RUN pnpm --filter @learning-analytics/api build
 
-# 6. Prune dev dependencies
-RUN pnpm prune --prod
-
-# ---------------- Runner Stage ----------------
-
-FROM node:20-slim AS runner
+# -------------------- Runner Stage --------------------
+FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends openssl ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+# Copy workspace metadata
+COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
+COPY --from=builder /app/packages/shared/package.json ./packages/shared/
+COPY --from=builder /app/apps/api/package.json ./apps/api/
 
-COPY --from=builder /app /app
-COPY apps/api/docker-entrypoint.sh /app/apps/api/docker-entrypoint.sh
+# Copy built artifacts
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/apps/api/dist ./apps/api/dist
 
+# Install only production dependencies for the API
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+RUN pnpm install --frozen-lockfile --prod --filter @learning-analytics/api
+
+WORKDIR /app/apps/api
 EXPOSE 3001
-ENTRYPOINT ["/bin/bash", "/app/apps/api/docker-entrypoint.sh"]
+CMD ["node", "dist/main.js"]

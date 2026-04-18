@@ -12,7 +12,7 @@ function cellColor(avgRisk: number) {
 export function RiskHeatmap({ data }: { data: HeatmapCell[] }) {
   return (
     <div className="rounded-xl border border-slate-700 bg-slate-900/50 p-4">
-      <h3 className="mb-3 text-sm font-medium text-slate-300">Risk heatmap by grade / class</h3>
+      <h3 className="mb-3 text-sm font-medium text-slate-300">Cohort risk overview</h3>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {data.map((c) => (
           <div

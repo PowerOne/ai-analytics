@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { HeatmapCell } from "../../lms-heatmaps/dto/heatmap-cell.dto";
 import { SchoolTrendSummary } from "../../principal-reports/dto/school-trend.dto";
+import { PrincipalAttendanceEngagementHeatmapBlockDto } from "./principal-attendance-engagement-heatmap.dto";
 
 export class PrincipalInterventionsBlockDto {
   @ApiProperty()
@@ -67,6 +68,13 @@ export class PrincipalDashboardResponse {
 
   @ApiProperty({ type: PrincipalHeatmapBlockDto })
   heatmap!: PrincipalHeatmapBlockDto;
+
+  @ApiPropertyOptional({
+    type: PrincipalAttendanceEngagementHeatmapBlockDto,
+    description:
+      "Live attendance + LMS engagement buckets (optional until API supports it; clients should use optional chaining)",
+  })
+  principalAttendanceEngagementHeatmap?: PrincipalAttendanceEngagementHeatmapBlockDto;
 
   @ApiPropertyOptional({ nullable: true })
   aiSummary?: string | null;

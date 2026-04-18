@@ -1,45 +1,46 @@
-# -----------------------------
-# 1. Builder Stage
-# -----------------------------
-FROM node:18-alpine AS builder
-
+# Production Dockerfile for @learning-analytics/api (NestJS) — PRISMA REMOVED
+FROM node:20-bookworm AS builder
 WORKDIR /app
 
-# Install pnpm globally
-RUN npm install -g pnpm
+# Enable pnpm
+RUN npm install -g pnpm@9.15.4
 
-# Copy workspace root files
-COPY pnpm-workspace.yaml pnpm-workspace.yaml
-COPY pnpm-lock.yaml pnpm-lock.yaml
-COPY package.json package.json
+# Copy workspace metadata
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY tsconfig.base.json ./
 
-# Copy the entire monorepo BEFORE installing dependencies
-COPY . .
+# Copy source
+COPY packages/shared packages/shared
+COPY apps/api apps/api
 
-# Install ALL workspace dependencies (including Prisma)
+# Install all workspace dependencies
 RUN pnpm install --frozen-lockfile
 
-# Generate Prisma Client explicitly (ensures schema is fresh)
-WORKDIR /app/apps/api
-RUN pnpm prisma generate
+# Build shared first
+RUN pnpm --filter @learning-analytics/shared build
 
-# Build the API
-RUN pnpm build
+# Build API (NestJS)
+RUN pnpm --filter @learning-analytics/api build
 
-
-# -----------------------------
-# 2. Production Stage
-# -----------------------------
-FROM node:18-alpine AS production
-
+# -------------------- Production Stage --------------------
+FROM node:20-bookworm-slim AS production
 WORKDIR /app
 
-RUN npm install -g pnpm
+# Enable pnpm
+RUN npm install -g pnpm@9.15.4
 
-# Copy built API output
-COPY --from=builder /app/apps/api/dist ./dist
-COPY --from=builder /app/apps/api/prisma ./prisma
+# Copy workspace metadata
+COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/pnpm-workspace.yaml ./
+COPY --from=builder /app/packages/shared/package.json ./packages/shared/
+COPY --from=builder /app/apps/api/package.json ./apps/api/
 
+# Copy built artifacts
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
+COPY --from=builder /app/apps/api/dist ./apps/api/dist
+
+# Install only production dependencies for the API
+RUN pnpm install --frozen-lockfile --prod --filter @learning-analytics/api
+
+WORKDIR /app/apps/api
 EXPOSE 3001
-
 CMD ["node", "dist/main.js"]

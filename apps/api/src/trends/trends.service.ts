@@ -1,12 +1,47 @@
 import { Injectable } from "@nestjs/common";
-import { UserRole } from "@prisma/client";
+import type { RowDataPacket } from "mysql2/promise";
 import { AnalyticsService } from "../analytics/analytics.service";
+import { UserRole } from "../common/user-role";
 import type { TrendPoint } from "../analytics/dto/common.dto";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import type { HeatmapCell } from "../lms-heatmaps/dto/heatmap-cell.dto";
-import { PrismaService } from "../prisma/prisma.service";
+import { MySQLService } from "../database/mysql.service";
 import { TrendDeltaDto } from "./dto/trend-delta.dto";
 import { TrendWindowDto } from "./dto/trend-window.dto";
+
+type AvgEngRow = RowDataPacket & { avgEng: number | null };
+
+type StudentSnapTrendRow = RowDataPacket & {
+  performance: number | null;
+  attendance: number | null;
+  engagement: number | null;
+  riskScore: number | null;
+  riskTier: string | null;
+};
+
+type ClassSnapTrendRow = RowDataPacket & {
+  performance: number | null;
+  attendance: number | null;
+  engagement: number | null;
+  riskScore: number | null;
+};
+
+type CohortSnapTrendRow = RowDataPacket & {
+  performance: number | null;
+  attendance: number | null;
+  engagement: number | null;
+  riskAverage: number | null;
+};
+
+type SchoolSnapTrendRow = RowDataPacket & {
+  performance: number | null;
+  attendance: number | null;
+  engagement: number | null;
+  riskAverage: number | null;
+  riskHigh: number | null;
+};
+
+type StudentIdRow = RowDataPacket & { studentId: string };
 
 function toPrincipalScope(schoolId: string): JwtPayload {
   return {
@@ -77,7 +112,7 @@ function isHighSnapshotTier(t: string | null | undefined): boolean {
 @Injectable()
 export class TrendService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: MySQLService,
     private readonly analytics: AnalyticsService,
   ) {}
 
@@ -126,29 +161,116 @@ export class TrendService {
     const now = new Date();
     const lastStart = subDays(now, windowDays);
     const prevStart = subDays(now, windowDays * 2);
-    const [lastAgg, prevAgg] = await Promise.all([
-      this.prisma.lmsActivityEvent.aggregate({
-        where: {
-          schoolId,
-          studentId: { in: studentIds },
-          deletedAt: null,
-          occurredAt: { gte: lastStart },
-        },
-        _avg: { engagementScore: true },
-      }),
-      this.prisma.lmsActivityEvent.aggregate({
-        where: {
-          schoolId,
-          studentId: { in: studentIds },
-          deletedAt: null,
-          occurredAt: { gte: prevStart, lt: lastStart },
-        },
-        _avg: { engagementScore: true },
-      }),
+    const placeholders = studentIds.map(() => "?").join(", ");
+    const baseParams = [schoolId, ...studentIds];
+    const lastSql = `
+      SELECT AVG(engagement_score) AS avgEng
+      FROM lms_activity_events
+      WHERE school_id = ?
+        AND student_id IN (${placeholders})
+        AND deleted_at IS NULL
+        AND occurred_at >= ?
+    `;
+    const prevSql = `
+      SELECT AVG(engagement_score) AS avgEng
+      FROM lms_activity_events
+      WHERE school_id = ?
+        AND student_id IN (${placeholders})
+        AND deleted_at IS NULL
+        AND occurred_at >= ?
+        AND occurred_at < ?
+    `;
+    const [lastQ, prevQ] = await Promise.all([
+      this.db.query(lastSql, [...baseParams, lastStart]),
+      this.db.query(prevSql, [...baseParams, prevStart, lastStart]),
     ]);
-    const last = lastAgg._avg.engagementScore ? Number(lastAgg._avg.engagementScore) : 0;
-    const prev = prevAgg._avg.engagementScore ? Number(prevAgg._avg.engagementScore) : 0;
+    const lastRows = lastQ[0] as AvgEngRow[];
+    const prevRows = prevQ[0] as AvgEngRow[];
+    const last = lastRows[0]?.avgEng != null ? Number(lastRows[0].avgEng) : 0;
+    const prev = prevRows[0]?.avgEng != null ? Number(prevRows[0].avgEng) : 0;
     return Math.round((last - prev) * 1000) / 1000;
+  }
+
+  private async findWeeklyStudentSnapForTrend(
+    schoolId: string,
+    studentId: string,
+    weekStart: Date,
+  ): Promise<StudentSnapTrendRow | null> {
+    const sql = `
+      SELECT performance, attendance, engagement, \`riskScore\`, \`riskTier\`
+      FROM weekly_student_snapshots
+      WHERE \`schoolId\` = ? AND \`studentId\` = ? AND \`weekStartDate\` = ?
+      LIMIT 1
+    `;
+    const packet = (await this.db.query(sql, [
+      schoolId,
+      studentId,
+      weekStart,
+    ]))[0] as StudentSnapTrendRow[];
+    const rows = packet as StudentSnapTrendRow[];
+    return rows[0] ?? null;
+  }
+
+  private async findWeeklyClassSnapForTrend(
+    schoolId: string,
+    classId: string,
+    weekStart: Date,
+  ): Promise<ClassSnapTrendRow | null> {
+    const sql = `
+      SELECT performance, attendance, engagement, \`riskScore\`
+      FROM weekly_class_snapshots
+      WHERE \`schoolId\` = ? AND \`classId\` = ? AND \`weekStartDate\` = ?
+      LIMIT 1
+    `;
+    const packet = (await this.db.query(sql, [schoolId, classId, weekStart]))[0] as ClassSnapTrendRow[];
+    const rows = packet as ClassSnapTrendRow[];
+    return rows[0] ?? null;
+  }
+
+  private async findWeeklyCohortSnapForTrend(
+    schoolId: string,
+    cohortType: string,
+    cohortId: string,
+    weekStart: Date,
+  ): Promise<CohortSnapTrendRow | null> {
+    const sql = `
+      SELECT performance, attendance, engagement, \`riskAverage\`
+      FROM weekly_cohort_snapshots
+      WHERE \`schoolId\` = ? AND \`cohortType\` = ? AND \`cohortId\` = ? AND \`weekStartDate\` = ?
+      LIMIT 1
+    `;
+    const packet = (await this.db.query(sql, [
+      schoolId,
+      cohortType,
+      cohortId,
+      weekStart,
+    ]))[0] as CohortSnapTrendRow[];
+    const rows = packet as CohortSnapTrendRow[];
+    return rows[0] ?? null;
+  }
+
+  private async findWeeklySchoolSnapForTrend(
+    schoolId: string,
+    weekStart: Date,
+  ): Promise<SchoolSnapTrendRow | null> {
+    const sql = `
+      SELECT performance, attendance, engagement, \`riskAverage\`, \`riskHigh\`
+      FROM weekly_school_snapshots
+      WHERE \`schoolId\` = ? AND \`weekStartDate\` = ?
+      LIMIT 1
+    `;
+    const packet = (await this.db.query(sql, [schoolId, weekStart]))[0] as SchoolSnapTrendRow[];
+    const rows = packet as SchoolSnapTrendRow[];
+    return rows[0] ?? null;
+  }
+
+  private async classEnrollmentStudentIds(schoolId: string, classId: string): Promise<string[]> {
+    const sql = `
+      SELECT DISTINCT student_id AS studentId FROM enrollments
+      WHERE school_id = ? AND class_id = ? AND deleted_at IS NULL AND status = 'active'
+    `;
+    const packet = (await this.db.query(sql, [schoolId, classId]))[0] as StudentIdRow[];
+    return (packet as StudentIdRow[]).map((r) => r.studentId);
   }
 
   async getStudentTrend(
@@ -160,22 +282,30 @@ export class TrendService {
     const scoped = this.scoped(user, schoolId);
 
     const [t, l] = await Promise.all([
-      this.prisma.weeklyStudentSnapshot.findFirst({
-        where: { schoolId, studentId, weekStartDate: thisWeekMonday },
-      }),
-      this.prisma.weeklyStudentSnapshot.findFirst({
-        where: { schoolId, studentId, weekStartDate: lastWeekMonday },
-      }),
+      this.findWeeklyStudentSnapForTrend(schoolId, studentId, thisWeekMonday),
+      this.findWeeklyStudentSnapForTrend(schoolId, studentId, lastWeekMonday),
     ]);
 
     if (t && l) {
       const highRiskNew =
         isHighSnapshotTier(t.riskTier) && !isHighSnapshotTier(l.riskTier) ? 1 : 0;
       return {
-        performanceDelta: deltaPerformance(t.performance, l.performance),
-        attendanceDelta: deltaAttendance(t.attendance, l.attendance),
-        engagementDelta: deltaEngagement(t.engagement, l.engagement),
-        riskDelta: deltaRisk(t.riskScore, l.riskScore),
+        performanceDelta: deltaPerformance(
+          t.performance != null ? Number(t.performance) : null,
+          l.performance != null ? Number(l.performance) : null,
+        ),
+        attendanceDelta: deltaAttendance(
+          t.attendance != null ? Number(t.attendance) : null,
+          l.attendance != null ? Number(l.attendance) : null,
+        ),
+        engagementDelta: deltaEngagement(
+          t.engagement != null ? Number(t.engagement) : null,
+          l.engagement != null ? Number(l.engagement) : null,
+        ),
+        riskDelta: deltaRisk(
+          t.riskScore != null ? Number(t.riskScore) : null,
+          l.riskScore != null ? Number(l.riskScore) : null,
+        ),
         highRiskNew,
       };
     }
@@ -216,20 +346,28 @@ export class TrendService {
     const scoped = this.scoped(user, schoolId);
 
     const [t, l] = await Promise.all([
-      this.prisma.weeklyClassSnapshot.findFirst({
-        where: { schoolId, classId, weekStartDate: thisWeekMonday },
-      }),
-      this.prisma.weeklyClassSnapshot.findFirst({
-        where: { schoolId, classId, weekStartDate: lastWeekMonday },
-      }),
+      this.findWeeklyClassSnapForTrend(schoolId, classId, thisWeekMonday),
+      this.findWeeklyClassSnapForTrend(schoolId, classId, lastWeekMonday),
     ]);
 
     if (t && l) {
       return {
-        performanceDelta: deltaPerformance(t.performance, l.performance),
-        attendanceDelta: deltaAttendance(t.attendance, l.attendance),
-        engagementDelta: deltaEngagement(t.engagement, l.engagement),
-        riskDelta: deltaRisk(t.riskScore, l.riskScore),
+        performanceDelta: deltaPerformance(
+          t.performance != null ? Number(t.performance) : null,
+          l.performance != null ? Number(l.performance) : null,
+        ),
+        attendanceDelta: deltaAttendance(
+          t.attendance != null ? Number(t.attendance) : null,
+          l.attendance != null ? Number(l.attendance) : null,
+        ),
+        engagementDelta: deltaEngagement(
+          t.engagement != null ? Number(t.engagement) : null,
+          l.engagement != null ? Number(l.engagement) : null,
+        ),
+        riskDelta: deltaRisk(
+          t.riskScore != null ? Number(t.riskScore) : null,
+          l.riskScore != null ? Number(l.riskScore) : null,
+        ),
       };
     }
 
@@ -246,16 +384,7 @@ export class TrendService {
         ? Math.round((perfThis - perfPrev) * 10) / 10
         : 0;
 
-    const enrollments = await this.prisma.enrollment.findMany({
-      where: {
-        schoolId,
-        classId,
-        deletedAt: null,
-        status: "active",
-      },
-      select: { studentId: true },
-    });
-    const studentIds = enrollments.map((e) => e.studentId);
+    const studentIds = await this.classEnrollmentStudentIds(schoolId, classId);
     const engagementDelta = await this.engagementAvgDelta(schoolId, studentIds, 7);
 
     return {
@@ -274,20 +403,28 @@ export class TrendService {
     const { thisWeekMonday, lastWeekMonday } = this.weekDates();
 
     const [t, l] = await Promise.all([
-      this.prisma.weeklyCohortSnapshot.findFirst({
-        where: { schoolId, cohortType, cohortId, weekStartDate: thisWeekMonday },
-      }),
-      this.prisma.weeklyCohortSnapshot.findFirst({
-        where: { schoolId, cohortType, cohortId, weekStartDate: lastWeekMonday },
-      }),
+      this.findWeeklyCohortSnapForTrend(schoolId, cohortType, cohortId, thisWeekMonday),
+      this.findWeeklyCohortSnapForTrend(schoolId, cohortType, cohortId, lastWeekMonday),
     ]);
 
     if (t && l) {
       return {
-        performanceDelta: deltaPerformance(t.performance, l.performance),
-        attendanceDelta: deltaAttendance(t.attendance, l.attendance),
-        engagementDelta: deltaEngagement(t.engagement, l.engagement),
-        riskDelta: deltaRisk(t.riskAverage, l.riskAverage),
+        performanceDelta: deltaPerformance(
+          t.performance != null ? Number(t.performance) : null,
+          l.performance != null ? Number(l.performance) : null,
+        ),
+        attendanceDelta: deltaAttendance(
+          t.attendance != null ? Number(t.attendance) : null,
+          l.attendance != null ? Number(l.attendance) : null,
+        ),
+        engagementDelta: deltaEngagement(
+          t.engagement != null ? Number(t.engagement) : null,
+          l.engagement != null ? Number(l.engagement) : null,
+        ),
+        riskDelta: deltaRisk(
+          t.riskAverage != null ? Number(t.riskAverage) : null,
+          l.riskAverage != null ? Number(l.riskAverage) : null,
+        ),
       };
     }
 
@@ -303,21 +440,29 @@ export class TrendService {
     const { thisWeekMonday, lastWeekMonday } = this.weekDates();
 
     const [t, l] = await Promise.all([
-      this.prisma.weeklySchoolSnapshot.findFirst({
-        where: { schoolId, weekStartDate: thisWeekMonday },
-      }),
-      this.prisma.weeklySchoolSnapshot.findFirst({
-        where: { schoolId, weekStartDate: lastWeekMonday },
-      }),
+      this.findWeeklySchoolSnapForTrend(schoolId, thisWeekMonday),
+      this.findWeeklySchoolSnapForTrend(schoolId, lastWeekMonday),
     ]);
 
     if (t && l) {
       return {
-        performanceDelta: deltaPerformance(t.performance, l.performance),
-        attendanceDelta: deltaAttendance(t.attendance, l.attendance),
-        engagementDelta: deltaEngagement(t.engagement, l.engagement),
-        riskDelta: deltaRisk(t.riskAverage, l.riskAverage),
-        highRiskNew: t.riskHigh ?? 0,
+        performanceDelta: deltaPerformance(
+          t.performance != null ? Number(t.performance) : null,
+          l.performance != null ? Number(l.performance) : null,
+        ),
+        attendanceDelta: deltaAttendance(
+          t.attendance != null ? Number(t.attendance) : null,
+          l.attendance != null ? Number(l.attendance) : null,
+        ),
+        engagementDelta: deltaEngagement(
+          t.engagement != null ? Number(t.engagement) : null,
+          l.engagement != null ? Number(l.engagement) : null,
+        ),
+        riskDelta: deltaRisk(
+          t.riskAverage != null ? Number(t.riskAverage) : null,
+          l.riskAverage != null ? Number(l.riskAverage) : null,
+        ),
+        highRiskNew: t.riskHigh != null ? Number(t.riskHigh) : 0,
       };
     }
 

@@ -10,6 +10,7 @@ import { useEffect } from "react";
 const NAV: { href: string; label: string; roles: UserRole[] }[] = [
   { href: "/teacher-dashboard", label: "Teacher Dashboard", roles: ["TEACHER", "ADMIN", "PRINCIPAL"] },
   { href: "/principal-dashboard", label: "Principal Dashboard", roles: ["ADMIN", "PRINCIPAL"] },
+  { href: "/principal-dashboard-noc", label: "NOC Dashboard (Preview)", roles: ["ADMIN", "PRINCIPAL"] },
   { href: "/cohort-dashboard", label: "Cohort Dashboard", roles: ["ADMIN", "PRINCIPAL"] },
   { href: "/student", label: "Student 360", roles: ["TEACHER", "ADMIN", "PRINCIPAL"] },
 ];

@@ -1,8 +1,14 @@
-import { Prisma, UserRole } from "@prisma/client";
+import { UserRole } from "./user-role";
 import type { JwtPayload } from "./types/jwt-payload";
 
-export function scopeStudents(user: JwtPayload): Prisma.StudentWhereInput {
-  const base: Prisma.StudentWhereInput = { schoolId: user.schoolId, deletedAt: null };
+/**
+ * Tenant-scoped filter helpers for raw SQL query building (types may be absent
+ * when using raw SQL only). Safe to use if you bridge these into query builders.
+ */
+export type TenantWhereInput = Record<string, unknown>;
+
+export function scopeStudents(user: JwtPayload): TenantWhereInput {
+  const base: TenantWhereInput = { schoolId: user.schoolId, deletedAt: null };
   if (user.role === UserRole.TEACHER && user.teacherId) {
     return {
       ...base,
@@ -17,24 +23,24 @@ export function scopeStudents(user: JwtPayload): Prisma.StudentWhereInput {
   return base;
 }
 
-export function scopeClasses(user: JwtPayload): Prisma.ClassWhereInput {
-  const base: Prisma.ClassWhereInput = { schoolId: user.schoolId, deletedAt: null };
+export function scopeClasses(user: JwtPayload): TenantWhereInput {
+  const base: TenantWhereInput = { schoolId: user.schoolId, deletedAt: null };
   if (user.role === UserRole.TEACHER && user.teacherId) {
     return { ...base, primaryTeacherId: user.teacherId };
   }
   return base;
 }
 
-export function scopeAssessments(user: JwtPayload): Prisma.AssessmentWhereInput {
-  const base: Prisma.AssessmentWhereInput = { schoolId: user.schoolId, deletedAt: null };
+export function scopeAssessments(user: JwtPayload): TenantWhereInput {
+  const base: TenantWhereInput = { schoolId: user.schoolId, deletedAt: null };
   if (user.role === UserRole.TEACHER && user.teacherId) {
     return { ...base, class: { primaryTeacherId: user.teacherId, deletedAt: null } };
   }
   return base;
 }
 
-export function scopeAttendance(user: JwtPayload): Prisma.AttendanceRecordWhereInput {
-  const base: Prisma.AttendanceRecordWhereInput = { schoolId: user.schoolId, deletedAt: null };
+export function scopeAttendance(user: JwtPayload): TenantWhereInput {
+  const base: TenantWhereInput = { schoolId: user.schoolId, deletedAt: null };
   if (user.role === UserRole.TEACHER && user.teacherId) {
     return { ...base, class: { primaryTeacherId: user.teacherId, deletedAt: null } };
   }

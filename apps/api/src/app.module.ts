@@ -14,7 +14,7 @@ import { IntegrationsModule } from "./integrations/integrations.module";
 import { InterventionsModule } from "./interventions/interventions.module";
 import { LmsHeatmapsModule } from "./lms-heatmaps/lms-heatmaps.module";
 import { PrincipalReportsModule } from "./principal-reports/principal-reports.module";
-import { PrismaModule } from "./prisma/prisma.module";
+import { MysqlModule } from "./database/mysql.module";
 import { RiskModule } from "./risk/risk.module";
 import { SnapshotsModule } from "./snapshots/snapshots.module";
 import { StudentsModule } from "./students/students.module";
@@ -26,7 +26,7 @@ import { WeeklyReportsModule } from "./weekly-reports/weekly-reports.module";
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    PrismaModule,
+    MysqlModule,
     TrendsModule,
     AnalyticsModule,
     InsightsModule,

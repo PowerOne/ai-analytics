@@ -6,20 +6,27 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { UserRole } from "@prisma/client";
-import type { Prisma } from "@prisma/client";
 import { AxiosError } from "axios";
+import type { RowDataPacket } from "mysql2/promise";
 import { firstValueFrom } from "rxjs";
+import { UserRole } from "../common/user-role";
 import type { JwtPayload } from "../common/types/jwt-payload";
 import { aiHttpHeaders } from "../integrations/ai-request-headers";
-import { scopeClasses, scopeStudents } from "../common/tenant-scope";
-import { PrismaService } from "../prisma/prisma.service";
+import { MySQLService } from "../database/mysql.service";
 import type { HeatmapCell } from "./dto/heatmap-cell.dto";
 import type { ClassHeatmapResponse } from "./dto/class-heatmap.dto";
 import type { GradeHeatmapResponse } from "./dto/grade-heatmap.dto";
 import type { SchoolHeatmapResponse } from "./dto/school-heatmap.dto";
 import type { StudentHeatmapResponse } from "./dto/student-heatmap.dto";
 import type { SubjectHeatmapResponse } from "./dto/subject-heatmap.dto";
+
+type IdRow = RowDataPacket & { id: string };
+
+type StudentIdRow = RowDataPacket & { studentId: string };
+
+type LmsEventRow = RowDataPacket & { occurredAt: Date; eventType: string };
+
+type StudentGradeRow = RowDataPacket & { id: string; gradeLevel: string | null };
 
 function toUtcYmd(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -44,35 +51,6 @@ function normalizeGradeKey(gradeLevel: string | null | undefined): string {
   return g.length ? g : "_unassigned";
 }
 
-function teacherLmsWhere(user: JwtPayload): Prisma.LmsActivityEventWhereInput | undefined {
-  if (user.role !== UserRole.TEACHER || !user.teacherId) return undefined;
-  return {
-    OR: [
-      {
-        classId: null,
-        student: {
-          enrollments: {
-            some: {
-              deletedAt: null,
-              class: { primaryTeacherId: user.teacherId, deletedAt: null },
-            },
-          },
-        },
-      },
-      { class: { primaryTeacherId: user.teacherId, deletedAt: null } },
-    ],
-  };
-}
-
-function mergeTeacherScope(
-  base: Prisma.LmsActivityEventWhereInput,
-  user: JwtPayload,
-): Prisma.LmsActivityEventWhereInput {
-  const t = teacherLmsWhere(user);
-  if (!t) return base;
-  return { AND: [base, t] };
-}
-
 function defaultDateRange(): { from: Date; to: Date } {
   const to = new Date();
   const from = new Date(to);
@@ -91,13 +69,35 @@ export class LmsHeatmapsService {
   private readonly logger = new Logger(LmsHeatmapsService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly db: MySQLService,
     private readonly http: HttpService,
     private readonly config: ConfigService,
   ) {}
 
   private getAiBaseUrl(): string {
     return (this.config.get<string>("AI_SERVICE_URL") ?? "http://ai:8000").replace(/\/$/, "");
+  }
+
+  /** AND (…) matching teacher-scoped LMS filters merged into event queries. */
+  private teacherLmsEventScopeSql(alias: string, teacherId: string): { sql: string; params: unknown[] } {
+    return {
+      sql: ` AND (
+        (${alias}.class_id IS NULL AND EXISTS (
+          SELECT 1 FROM enrollments en
+          INNER JOIN classes c ON c.id = en.class_id AND c.deleted_at IS NULL
+          WHERE en.student_id = ${alias}.student_id
+            AND en.school_id = ${alias}.school_id
+            AND en.deleted_at IS NULL
+            AND en.status = 'active'
+            AND c.primary_teacher_id = ?
+        ))
+        OR EXISTS (
+          SELECT 1 FROM classes c
+          WHERE c.id = ${alias}.class_id AND c.deleted_at IS NULL AND c.primary_teacher_id = ?
+        )
+      )`,
+      params: [teacherId, teacherId],
+    };
   }
 
   private async tryAiSummary(payload: Record<string, unknown>): Promise<string | null> {
@@ -142,27 +142,88 @@ export class LmsHeatmapsService {
       .map(([date, v]) => ({ date, count: v.count, eventTypes: v.eventTypes }));
   }
 
-  private async fetchEvents(where: Prisma.LmsActivityEventWhereInput): Promise<
-    { occurredAt: Date; eventType: string }[]
-  > {
-    return this.prisma.lmsActivityEvent.findMany({
-      where: { ...where, deletedAt: null },
-      select: { occurredAt: true, eventType: true },
-    });
+  private async fetchLmsEvents(
+    schoolId: string,
+    user: JwtPayload,
+    whereSql: string,
+    whereParams: unknown[],
+  ): Promise<{ occurredAt: Date; eventType: string }[]> {
+    let sql = `
+      SELECT e.occurred_at AS occurredAt, e.event_type AS eventType
+      FROM lms_activity_events e
+      WHERE e.school_id = ?
+        AND e.deleted_at IS NULL
+        AND ${whereSql}
+    `;
+    const params: unknown[] = [schoolId, ...whereParams];
+    if (user.role === UserRole.TEACHER && user.teacherId) {
+      const t = this.teacherLmsEventScopeSql("e", user.teacherId);
+      sql += t.sql;
+      params.push(...t.params);
+    }
+    const packet = (await this.db.query(sql, params))[0] as LmsEventRow[];
+    const rows = packet as LmsEventRow[];
+    return rows.map((r) => ({ occurredAt: r.occurredAt, eventType: r.eventType }));
+  }
+
+  private async assertStudentInScope(studentId: string, user: JwtPayload): Promise<boolean> {
+    if (user.role === UserRole.TEACHER && user.teacherId) {
+      const sql = `
+        SELECT s.id FROM students s
+        WHERE s.id = ? AND s.school_id = ? AND s.deleted_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM enrollments e
+            INNER JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
+            WHERE e.student_id = s.id AND e.school_id = s.school_id
+              AND e.deleted_at IS NULL AND e.status = 'active'
+              AND c.primary_teacher_id = ?
+          )
+        LIMIT 1
+      `;
+      const packet = (await this.db.query(sql, [
+        studentId,
+        user.schoolId,
+        user.teacherId,
+      ]))[0] as RowDataPacket[];
+      return !!(packet as RowDataPacket[])[0];
+    }
+    const sql = `SELECT id FROM students WHERE id = ? AND school_id = ? AND deleted_at IS NULL LIMIT 1`;
+    const packet = (await this.db.query(sql, [studentId, user.schoolId]))[0] as RowDataPacket[];
+    return !!(packet as RowDataPacket[])[0];
+  }
+
+  private async assertClassInScope(classId: string, user: JwtPayload): Promise<boolean> {
+    if (user.role === UserRole.TEACHER && user.teacherId) {
+      const sql = `
+        SELECT id FROM classes
+        WHERE id = ? AND school_id = ? AND deleted_at IS NULL AND primary_teacher_id = ?
+        LIMIT 1
+      `;
+      const packet = (await this.db.query(sql, [
+        classId,
+        user.schoolId,
+        user.teacherId,
+      ]))[0] as RowDataPacket[];
+      return !!(packet as RowDataPacket[])[0];
+    }
+    const sql = `SELECT id FROM classes WHERE id = ? AND school_id = ? AND deleted_at IS NULL LIMIT 1`;
+    const packet = (await this.db.query(sql, [classId, user.schoolId]))[0] as RowDataPacket[];
+    return !!(packet as RowDataPacket[])[0];
   }
 
   private async teacherStudentIdSet(user: JwtPayload): Promise<Set<string> | null> {
     if (user.role !== UserRole.TEACHER || !user.teacherId) return null;
-    const rows = await this.prisma.enrollment.findMany({
-      where: {
-        schoolId: user.schoolId,
-        deletedAt: null,
-        status: "active",
-        class: { primaryTeacherId: user.teacherId, deletedAt: null },
-      },
-      select: { studentId: true },
-      distinct: ["studentId"],
-    });
+    const sql = `
+      SELECT DISTINCT e.student_id AS studentId
+      FROM enrollments e
+      INNER JOIN classes c ON c.id = e.class_id AND c.deleted_at IS NULL
+      WHERE e.school_id = ?
+        AND e.deleted_at IS NULL
+        AND e.status = 'active'
+        AND c.primary_teacher_id = ?
+    `;
+    const packet = (await this.db.query(sql, [user.schoolId, user.teacherId]))[0] as StudentIdRow[];
+    const rows = packet as StudentIdRow[];
     return new Set(rows.map((r) => r.studentId));
   }
 
@@ -173,23 +234,15 @@ export class LmsHeatmapsService {
     from?: string,
     to?: string,
   ): Promise<StudentHeatmapResponse> {
-    const st = await this.prisma.student.findFirst({
-      where: { id: studentId, ...scopeStudents(user) },
-    });
-    if (!st) throw new NotFoundException("Student not found");
+    const stOk = await this.assertStudentInScope(studentId, user);
+    if (!stOk) throw new NotFoundException("Student not found");
 
     const { from: f0, to: t0 } = defaultDateRange();
     const f = parseOptionalDate(from) ?? f0;
     const t = parseOptionalDate(to) ?? t0;
 
-    let base: Prisma.LmsActivityEventWhereInput = {
-      schoolId,
-      studentId,
-      occurredAt: { gte: f, lte: t },
-    };
-    base = mergeTeacherScope(base, user);
-
-    const events = await this.fetchEvents(base);
+    const whereSql = `e.student_id = ? AND e.occurred_at >= ? AND e.occurred_at <= ?`;
+    const events = await this.fetchLmsEvents(schoolId, user, whereSql, [studentId, f, t]);
     const heatmap = this.buildBuckets(events, "day");
     const weekly = this.buildBuckets(events, "week");
     const monthly = this.buildBuckets(events, "month");
@@ -213,23 +266,15 @@ export class LmsHeatmapsService {
     from?: string,
     to?: string,
   ): Promise<ClassHeatmapResponse> {
-    const cls = await this.prisma.class.findFirst({
-      where: { id: classId, ...scopeClasses(user) },
-    });
-    if (!cls) throw new NotFoundException("Class not found");
+    const clsOk = await this.assertClassInScope(classId, user);
+    if (!clsOk) throw new NotFoundException("Class not found");
 
     const { from: f0, to: t0 } = defaultDateRange();
     const f = parseOptionalDate(from) ?? f0;
     const t = parseOptionalDate(to) ?? t0;
 
-    let base: Prisma.LmsActivityEventWhereInput = {
-      schoolId,
-      classId,
-      occurredAt: { gte: f, lte: t },
-    };
-    base = mergeTeacherScope(base, user);
-
-    const events = await this.fetchEvents(base);
+    const whereSql = `e.class_id = ? AND e.occurred_at >= ? AND e.occurred_at <= ?`;
+    const events = await this.fetchLmsEvents(schoolId, user, whereSql, [classId, f, t]);
     const heatmap = this.buildBuckets(events, "day");
     const weekly = this.buildBuckets(events, "week");
     const monthly = this.buildBuckets(events, "month");
@@ -246,6 +291,16 @@ export class LmsHeatmapsService {
     return { classId, heatmap, weekly, monthly, aiSummary };
   }
 
+  private async fetchStudentsWithGrades(schoolId: string): Promise<StudentGradeRow[]> {
+    const sql = `
+      SELECT id, grade_level AS gradeLevel
+      FROM students
+      WHERE school_id = ? AND deleted_at IS NULL
+    `;
+    const packet = (await this.db.query(sql, [schoolId]))[0] as StudentGradeRow[];
+    return packet as StudentGradeRow[];
+  }
+
   async getGradeHeatmap(
     schoolId: string,
     gradeId: string,
@@ -254,10 +309,7 @@ export class LmsHeatmapsService {
     to?: string,
   ): Promise<GradeHeatmapResponse> {
     const key = decodeURIComponent(gradeId);
-    const students = await this.prisma.student.findMany({
-      where: { schoolId, deletedAt: null },
-      select: { id: true, gradeLevel: true },
-    });
+    const students = await this.fetchStudentsWithGrades(schoolId);
     let studentIds = students.filter((s) => normalizeGradeKey(s.gradeLevel) === key).map((s) => s.id);
 
     const allowed = await this.teacherStudentIdSet(user);
@@ -279,14 +331,9 @@ export class LmsHeatmapsService {
     const f = parseOptionalDate(from) ?? f0;
     const t = parseOptionalDate(to) ?? t0;
 
-    let base: Prisma.LmsActivityEventWhereInput = {
-      schoolId,
-      studentId: { in: studentIds },
-      occurredAt: { gte: f, lte: t },
-    };
-    base = mergeTeacherScope(base, user);
-
-    const events = await this.fetchEvents(base);
+    const ph = studentIds.map(() => "?").join(", ");
+    const whereSql = `e.student_id IN (${ph}) AND e.occurred_at >= ? AND e.occurred_at <= ?`;
+    const events = await this.fetchLmsEvents(schoolId, user, whereSql, [...studentIds, f, t]);
     const heatmap = this.buildBuckets(events, "day");
     const weekly = this.buildBuckets(events, "week");
     const monthly = this.buildBuckets(events, "month");
@@ -310,48 +357,40 @@ export class LmsHeatmapsService {
     from?: string,
     to?: string,
   ): Promise<SubjectHeatmapResponse> {
-    const sub = await this.prisma.subject.findFirst({
-      where: { id: subjectId, schoolId, deletedAt: null },
-    });
-    if (!sub) throw new NotFoundException("Subject not found");
+    const subSql = `SELECT id FROM subjects WHERE id = ? AND school_id = ? AND deleted_at IS NULL LIMIT 1`;
+    const subPacket = (await this.db.query(subSql, [subjectId, schoolId]))[0] as IdRow[];
+    if (!(subPacket as IdRow[])[0]) throw new NotFoundException("Subject not found");
 
-    let classFilter: Prisma.ClassWhereInput = { schoolId, subjectId, deletedAt: null };
+    let classSql = `
+      SELECT id FROM classes
+      WHERE school_id = ? AND subject_id = ? AND deleted_at IS NULL
+    `;
+    const classParams: unknown[] = [schoolId, subjectId];
     if (user.role === UserRole.TEACHER && user.teacherId) {
-      classFilter = { ...classFilter, primaryTeacherId: user.teacherId };
+      classSql += ` AND primary_teacher_id = ?`;
+      classParams.push(user.teacherId);
     }
+    const classPacket = (await this.db.query(classSql, classParams))[0] as IdRow[];
+    const classIds = (classPacket as IdRow[]).map((c) => c.id);
 
-    const classes = await this.prisma.class.findMany({
-      where: classFilter,
-      select: { id: true },
-    });
-    const classIds = classes.map((c) => c.id);
-
-    const enrollments = await this.prisma.enrollment.findMany({
-      where: {
-        schoolId,
-        deletedAt: null,
-        status: "active",
-        classId: { in: classIds },
-      },
-      select: { studentId: true },
-      distinct: ["studentId"],
-    });
-    const enrolledStudentIds = enrollments.map((e) => e.studentId);
+    let enrolledStudentIds: string[] = [];
+    if (classIds.length) {
+      const placeholders = classIds.map(() => "?").join(", ");
+      const enSql = `
+        SELECT DISTINCT e.student_id AS studentId
+        FROM enrollments e
+        WHERE e.school_id = ?
+          AND e.deleted_at IS NULL
+          AND e.status = 'active'
+          AND e.class_id IN (${placeholders})
+      `;
+      const enPacket = (await this.db.query(enSql, [schoolId, ...classIds]))[0] as StudentIdRow[];
+      enrolledStudentIds = (enPacket as StudentIdRow[]).map((r) => r.studentId);
+    }
 
     const { from: f0, to: t0 } = defaultDateRange();
     const f = parseOptionalDate(from) ?? f0;
     const t = parseOptionalDate(to) ?? t0;
-
-    let base: Prisma.LmsActivityEventWhereInput = {
-      schoolId,
-      occurredAt: { gte: f, lte: t },
-      OR: [
-        ...(classIds.length ? [{ classId: { in: classIds } }] : []),
-        ...(enrolledStudentIds.length
-          ? [{ classId: null, studentId: { in: enrolledStudentIds } }]
-          : []),
-      ],
-    };
 
     if (!classIds.length && !enrolledStudentIds.length) {
       return {
@@ -363,9 +402,20 @@ export class LmsHeatmapsService {
       };
     }
 
-    base = mergeTeacherScope(base, user);
-
-    const events = await this.fetchEvents(base);
+    const orParts: string[] = [];
+    const orParams: unknown[] = [];
+    if (classIds.length) {
+      orParts.push(`e.class_id IN (${classIds.map(() => "?").join(", ")})`);
+      orParams.push(...classIds);
+    }
+    if (enrolledStudentIds.length) {
+      orParts.push(
+        `(e.class_id IS NULL AND e.student_id IN (${enrolledStudentIds.map(() => "?").join(", ")}))`,
+      );
+      orParams.push(...enrolledStudentIds);
+    }
+    const whereSql = `(${orParts.join(" OR ")}) AND e.occurred_at >= ? AND e.occurred_at <= ?`;
+    const events = await this.fetchLmsEvents(schoolId, user, whereSql, [...orParams, f, t]);
     const heatmap = this.buildBuckets(events, "day");
     const weekly = this.buildBuckets(events, "week");
     const monthly = this.buildBuckets(events, "month");
@@ -396,13 +446,8 @@ export class LmsHeatmapsService {
     const f = parseOptionalDate(from) ?? f0;
     const t = parseOptionalDate(to) ?? t0;
 
-    let base: Prisma.LmsActivityEventWhereInput = {
-      schoolId,
-      occurredAt: { gte: f, lte: t },
-    };
-    base = mergeTeacherScope(base, user);
-
-    const events = await this.fetchEvents(base);
+    const whereSql = `e.occurred_at >= ? AND e.occurred_at <= ?`;
+    const events = await this.fetchLmsEvents(schoolId, user, whereSql, [f, t]);
     const heatmap = this.buildBuckets(events, "day");
     const weekly = this.buildBuckets(events, "week");
     const monthly = this.buildBuckets(events, "month");
