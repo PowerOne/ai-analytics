@@ -1,0 +1,4 @@
+"include": [
+  "apps/api/src/types/**/*",
+  "apps/api/src/**/*"
+]
