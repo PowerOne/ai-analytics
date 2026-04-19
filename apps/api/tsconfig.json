@@ -2,12 +2,15 @@
   "compilerOptions": {
     "module": "CommonJS",
     "moduleResolution": "node",
-    "outDir": "./dist",
-    "rootDir": "./src",
+    "target": "es2017",
+    "lib": ["es2017", "dom"],
+    "downlevelIteration": true,
+    "outDir": "../dist",
+    "rootDir": "../src",
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "baseUrl": "./"
   },
-  "include": ["src/**/*", "src/types/**/*"],
+  "include": ["src/**/*.ts", "src/types/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
