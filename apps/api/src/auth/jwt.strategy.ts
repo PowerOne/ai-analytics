@@ -1,6 +1,7 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PassportStrategy } from "@nestjs/passport";
+// @ts-ignore - Render build: ignore missing types for passport-jwt
 import { ExtractJwt, Strategy } from "passport-jwt";
 import type { RowDataPacket } from "mysql2/promise";
 import type { UserRole } from "../common/user-role";
@@ -39,9 +40,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
       WHERE id = ? AND school_id = ?
       LIMIT 1
     `;
+
     const rows = (await this.db.query(sql, [payload.sub, payload.schoolId]))[0] as UserJwtRow[];
     const user = rows[0];
+
     if (!user) throw new UnauthorizedException();
+
     return {
       sub: user.id,
       email: user.email,
