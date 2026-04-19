@@ -1,6 +1,6 @@
 "use client";
 
-import type { JSX } from "react";
+
 
 import { Heatmap } from "@/components/Heatmap";
 import { RiskDistribution } from "@/components/RiskDistribution";
