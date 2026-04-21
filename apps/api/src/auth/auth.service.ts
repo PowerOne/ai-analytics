@@ -10,10 +10,10 @@ import type { LoginDto } from "./dto/login.dto";
 type UserAuthRow = RowDataPacket & {
   id: string;
   email: string;
-  passwordHash: string;
-  schoolId: string;
+  password_hash: string;   // <-- FIXED
+  school_id: string;       // <-- FIXED
   role: UserRole;
-  teacherId: string | null;
+  teacher_id: string | null;
 };
 
 @Injectable()
@@ -25,42 +25,53 @@ export class AuthService {
 
   async validateUser(email: string, password: string) {
     const sql = `
-      SELECT id,
-             email,
-             password_hash AS passwordHash,
-             school_id AS schoolId,
-             role,
-             teacher_id AS teacherId
+      SELECT 
+        id,
+        email,
+        password_hash,
+        school_id,
+        role,
+        teacher_id
       FROM users
       WHERE email = ?
       LIMIT 1
     `;
+
     const rows = (await this.db.query(sql, [email]))[0] as UserAuthRow[];
     const user = rows[0];
+
     if (!user) return null;
-    const ok = await bcrypt.compare(password, user.passwordHash);
+
+    // IMPORTANT: compare with password_hash, not passwordHash
+    const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return null;
+
     return user;
   }
 
   async login(dto: LoginDto) {
     const user = await this.validateUser(dto.email, dto.password);
-    if (!user) throw new UnauthorizedException("Invalid credentials");
+
+    if (!user) {
+      throw new UnauthorizedException("Invalid credentials");
+    }
+
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
-      schoolId: user.schoolId,
+      schoolId: user.school_id,   // <-- FIXED
       role: user.role,
-      teacherId: user.teacherId,
+      teacherId: user.teacher_id, // <-- FIXED
     };
+
     return {
       accessToken: await this.jwt.signAsync(payload),
       user: {
         id: user.id,
         email: user.email,
-        schoolId: user.schoolId,
+        schoolId: user.school_id,
         role: user.role,
-        teacherId: user.teacherId,
+        teacherId: user.teacher_id,
       },
     };
   }
