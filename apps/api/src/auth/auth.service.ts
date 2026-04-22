@@ -1,6 +1,5 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
-import * as bcrypt from "bcryptjs";
 import type { RowDataPacket } from "mysql2/promise";
 import { MySQLService } from "../database/mysql.service";
 import type { JwtPayload } from "../common/types/jwt-payload";
@@ -10,8 +9,8 @@ import type { LoginDto } from "./dto/login.dto";
 type UserAuthRow = RowDataPacket & {
   id: string;
   email: string;
-  password_hash: string;   // <-- FIXED
-  school_id: string;       // <-- FIXED
+  password_hash: string;   // now plain text
+  school_id: string;
   role: UserRole;
   teacher_id: string | null;
 };
@@ -42,8 +41,8 @@ export class AuthService {
 
     if (!user) return null;
 
-    // IMPORTANT: compare with password_hash, not passwordHash
-    const ok = await bcrypt.compare(password, user.password_hash);
+    // PLAIN TEXT PASSWORD CHECK
+    const ok = password === user.password_hash;
     if (!ok) return null;
 
     return user;
@@ -59,9 +58,9 @@ export class AuthService {
     const payload: JwtPayload = {
       sub: user.id,
       email: user.email,
-      schoolId: user.school_id,   // <-- FIXED
+      schoolId: user.school_id,
       role: user.role,
-      teacherId: user.teacher_id, // <-- FIXED
+      teacherId: user.teacher_id,
     };
 
     return {
