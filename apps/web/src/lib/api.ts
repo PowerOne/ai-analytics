@@ -68,25 +68,35 @@ async function dashboardFetchJson<T>(path: string, token: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function buildPrincipalDashboardPath(
+  schoolId: string,
+  opts?: { from?: string; to?: string },
+): string {
+  const qs = new URLSearchParams();
+  if (opts?.from) qs.set("from", opts.from);
+  if (opts?.to) qs.set("to", opts.to);
+  const queryString = qs.toString();
+  return queryString
+    ? `/schools/${schoolId}/dashboards/principal?${queryString}`
+    : `/schools/${schoolId}/dashboards/principal`;
+}
+
 /** Principal school dashboard (`GET .../dashboards/principal`). Pass `SessionUser` or `(schoolId, token)`. */
 export async function getPrincipalDashboard(
   schoolIdOrUser: string | SessionUser,
   token?: string,
+  opts?: { from?: string; to?: string },
 ): Promise<PrincipalDashboardResponse> {
   if (typeof schoolIdOrUser === "object" && schoolIdOrUser !== null && "schoolId" in schoolIdOrUser) {
     const u = schoolIdOrUser as SessionUser;
-    return dashboardFetchJson<PrincipalDashboardResponse>(
-      `/schools/${u.schoolId}/dashboards/principal`,
-      u.token,
-    );
+    const path = buildPrincipalDashboardPath(u.schoolId, opts);
+    return dashboardFetchJson<PrincipalDashboardResponse>(path, u.token);
   }
   if (typeof schoolIdOrUser !== "string" || token === undefined) {
     throw new TypeError("getPrincipalDashboard: pass SessionUser or (schoolId, token)");
   }
-  return dashboardFetchJson<PrincipalDashboardResponse>(
-    `/schools/${schoolIdOrUser}/dashboards/principal`,
-    token,
-  );
+  const path = buildPrincipalDashboardPath(schoolIdOrUser, opts);
+  return dashboardFetchJson<PrincipalDashboardResponse>(path, token);
 }
 
 function riskLevelFromScore(score: number | null): StudentRow["riskLevel"] {
