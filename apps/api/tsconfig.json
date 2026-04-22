@@ -1,17 +1,16 @@
 {
   "compilerOptions": {
-    "module": "CommonJS",
+    "target": "es2019",
+    "module": "commonjs",
     "moduleResolution": "node",
-    "target": "es2017",
-    "lib": ["es2017", "dom"],
-    "downlevelIteration": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
     "outDir": "./dist",
-    "rootDir": "./src",
-    "emitDecoratorMetadata": true,
-    "experimentalDecorators": true,
-    "baseUrl": "./"
     "ignoreDeprecations": "6.0"
   },
-  "include": ["src/**/*.ts", "src/types/**/*.ts"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }
+
