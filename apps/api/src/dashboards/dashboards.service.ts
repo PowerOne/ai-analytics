@@ -956,23 +956,35 @@ export class DashboardsService {
     };
   }
 
-  async getPrincipalDashboard(schoolId: string, user: JwtPayload): Promise<PrincipalDashboardResponse> {
-    const intel = (await this.intelligenceEngine.getIntelligenceForSchool(
-      schoolId,
-      user,
-      "full",
-    )) as SchoolIntelligenceFullBundle;
-    return {
-      schoolId,
-      schoolTrends: intel.deltas,
-      cohorts: intel.cohortDashboard,
-      interventions: intel.interventions,
-      heatmap: intel.heatmaps as PrincipalHeatmapBlockDto,
-      principalAttendanceEngagementHeatmap: intel.attendanceEngagementBlock,
-      aiSummary: intel.aiSummary,
-      schoolInterventions: intel.schoolInterventions,
-    };
-  }
+  async getPrincipalDashboard(
+  schoolId: string,
+  user: JwtPayload,
+  range?: { from: Date; to: Date }
+): Promise<PrincipalDashboardResponse> {
+
+  const from = range?.from;
+  const to = range?.to;
+
+  const intel = (await this.intelligenceEngine.getIntelligenceForSchool(
+    schoolId,
+    user,
+    "full",
+    from,
+    to,
+  )) as SchoolIntelligenceFullBundle;
+
+  return {
+    schoolId,
+    schoolTrends: intel.deltas,
+    cohorts: intel.cohortDashboard,
+    interventions: intel.interventions,
+    heatmap: intel.heatmaps as PrincipalHeatmapBlockDto,
+    principalAttendanceEngagementHeatmap: intel.attendanceEngagementBlock,
+    aiSummary: intel.aiSummary,
+    schoolInterventions: intel.schoolInterventions,
+  };
+}
+
 
   async getPrincipalAttEngContributors(
     schoolId: string,
