@@ -271,8 +271,7 @@ export class IntelligenceEngineService {
   scope: "full" | "cohorts-only" = "full",
   from?: Date,
   to?: Date,
-)
-  ): Promise<SchoolIntelligenceFullBundle | { cohortSnapshots: CohortSummary[] }> {
+): Promise<SchoolIntelligenceFullBundle | { cohortSnapshots: CohortSummary[] }> {
     if (scope === "cohorts-only") {
       const thisWeekMonday = mondayUtcContaining(new Date());
       const cohortThis = await this.sqlWeeklyCohortSnapsSchoolWeek(schoolId, thisWeekMonday);
