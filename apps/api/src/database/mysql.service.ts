@@ -38,9 +38,11 @@ export class MySQLService implements OnModuleInit, OnModuleDestroy {
 
   private buildPoolOptions(): PoolOptions {
     const url = process.env.DATABASE_URL;
+
     if (url && (url.startsWith("mysql://") || url.startsWith("mysql2://"))) {
       const u = new URL(url);
       const database = u.pathname.replace(/^\//, "").split("?")[0];
+
       return {
         host: u.hostname,
         port: u.port ? Number(u.port) : 3306,
@@ -50,6 +52,9 @@ export class MySQLService implements OnModuleInit, OnModuleDestroy {
         waitForConnections: true,
         connectionLimit: 10,
         queueLimit: 0,
+        ssl: {
+          rejectUnauthorized: false, // REQUIRED FOR AIVEN
+        },
       };
     }
 
@@ -62,6 +67,9 @@ export class MySQLService implements OnModuleInit, OnModuleDestroy {
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
+      ssl: {
+        rejectUnauthorized: false,
+      },
     };
   }
 }

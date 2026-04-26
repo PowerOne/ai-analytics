@@ -266,10 +266,12 @@ export class IntelligenceEngineService {
    * - `cohorts-only`: weekly cohort snapshots → principal-report cohort DTOs (no LMS / AI).
    */
   async getIntelligenceForSchool(
-    schoolId: string,
-    user: JwtPayload,
-    scope: "full" | "cohorts-only" = "full",
-  ): Promise<SchoolIntelligenceFullBundle | { cohortSnapshots: CohortSummary[] }> {
+  schoolId: string,
+  user: JwtPayload,
+  scope: "full" | "cohorts-only" = "full",
+  from?: Date,
+  to?: Date,
+): Promise<SchoolIntelligenceFullBundle | { cohortSnapshots: CohortSummary[] }> {
     if (scope === "cohorts-only") {
       const thisWeekMonday = mondayUtcContaining(new Date());
       const cohortThis = await this.sqlWeeklyCohortSnapsSchoolWeek(schoolId, thisWeekMonday);
@@ -277,17 +279,20 @@ export class IntelligenceEngineService {
     }
 
     const scoped = toPrincipalScope(user, schoolId);
-    const now = new Date();
-    const thisWeekMonday = mondayUtcContaining(now);
-    const lastWeekMonday = new Date(thisWeekMonday);
-    lastWeekMonday.setUTCDate(lastWeekMonday.getUTCDate() - 7);
-    const weekEndExclusive = new Date(thisWeekMonday);
-    weekEndExclusive.setUTCDate(weekEndExclusive.getUTCDate() + 7);
+    // If caller provided a date range, use it.
+    // Otherwise fall back to existing logic.
+const now = to ?? new Date();
+const rangeFrom = from ?? new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
 
-    const heatmapFrom = new Date(now);
-    heatmapFrom.setUTCDate(heatmapFrom.getUTCDate() - 14);
-    const fromStr = formatYmd(heatmapFrom);
-    const toStr = formatYmd(now);
+const thisWeekMonday = mondayUtcContaining(now);
+const lastWeekMonday = new Date(thisWeekMonday);
+lastWeekMonday.setUTCDate(lastWeekMonday.getUTCDate() - 7);
+const weekEndExclusive = new Date(thisWeekMonday);
+weekEndExclusive.setUTCDate(weekEndExclusive.getUTCDate() + 7);
+
+const fromStr = formatYmd(rangeFrom);
+const toStr = formatYmd(now);
+
 
     const [schoolThis, schoolLast, cohortThis, cohortLast, hm, created, resolved, principalAttendanceEngagementHeatmap] =
       await Promise.all([

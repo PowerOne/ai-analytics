@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Param, Query, UseGuards, BadRequestException } from "@nestjs/common";
 import { ApiOkResponse, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { UserRole } from "../common/user-role";
 import { Roles } from "../auth/decorators/roles.decorator";
@@ -15,6 +15,7 @@ import { PrincipalAttEngContributorsResponseDto } from "./dto/principal-attendan
 import { PrincipalAttEngContributorsQueryDto } from "./dto/principal-att-eng-contributors-query.dto";
 import { Student360DashboardResponse } from "./dto/student360-dashboard.dto";
 import { TeacherDashboardResponse } from "./dto/teacher-dashboard.dto";
+import dayjs from "dayjs";
 
 @ApiTags("dashboards")
 @Controller("schools/:schoolId")
@@ -53,8 +54,27 @@ export class DashboardsController {
   @Roles(UserRole.ADMIN, UserRole.PRINCIPAL)
   @ApiOperation({ summary: "Principal dashboard: school snapshot trends, cohorts, interventions, heatmap" })
   @ApiOkResponse({ type: PrincipalDashboardResponse })
-  getPrincipalDashboard(@Param("schoolId") schoolId: string, @CurrentUser() user: JwtPayload) {
-    return this.dashboards.getPrincipalDashboard(schoolId, user);
+  getPrincipalDashboard(
+    @Param("schoolId") schoolId: string,
+    @CurrentUser() user: JwtPayload,
+    @Query("from") fromQuery?: string,
+    @Query("to") toQuery?: string,
+  ) {
+    const from = fromQuery ? dayjs(fromQuery) : dayjs().subtract(14, "days");
+    const to = toQuery ? dayjs(toQuery) : dayjs();
+
+    if (!from.isValid() || !to.isValid()) {
+      throw new BadRequestException("Invalid date format. Use YYYY-MM-DD.");
+    }
+
+    if (from.isAfter(to)) {
+      throw new BadRequestException('"from" must be before "to".');
+    }
+
+    return this.dashboards.getPrincipalDashboard(schoolId, user, {
+      from: from.toDate(),
+      to: to.toDate(),
+    });
   }
 
   @Get("dashboards/cohorts/grades/:gradeId")
